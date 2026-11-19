@@ -10,7 +10,7 @@ src/collector_main.cpp        ball_collector，运行状态机演示
 io/hikrobot/                  从原 RM 工程迁入的海康相机驱动
 io/chassis/velocity_command.hpp  车体速度接口，供任务层和底盘通信共用
 tasks/ball_collect/           五状态的采球状态机
-tools/                        从原 RM 工程迁入的日志、退出和队列工具
+tools/                        日志、退出、队列工具和 AprilTag 位姿解算
 ```
 
 状态机沿用 RM 工程把任务状态集中处理的做法。采球任务用
@@ -68,3 +68,38 @@ cmake --build build -j2
 ```
 
 视频时间由 OpenCV 视频后端提供。每次使用新的输出目录，保留不同场次的数据。
+
+## AprilTag 位姿解算
+
+`apriltag_pnp` 识别 `tag36h11 IDs 0-9.pdf` 中的 10 种标签。按实际大小打印，保留四周白边，然后用尺量黑色外边框的边长，单位为毫米。PDF 中的设计边长约 100 mm，命令里的 `--tag-size-mm` 以实测为准。同一批处理的标签应使用相同边长。
+
+在 RK3576 Ubuntu 上，使用 `libopencv-dev`（OpenCV 4.6 及更早版本还需要 `libopencv-contrib-dev`）、`libfmt-dev` 和 `libspdlog-dev` 构建海康取图模式。下例沿用项目记录的海康序列号。如果 `tags` 使用另一台海康相机，填写它的实际序列号。
+
+```bash
+cmake -S . -B build-tags -DBALL_BUILD_CAPTURE=OFF -DBALL_BUILD_APRILTAG_PNP=ON -DBALL_WITH_HIKROBOT=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build-tags --target apriltag_pnp -j2
+./build-tags/apriltag_pnp --serial=DA6415777 --calibration=configs/tags_calibration.yaml --tag-size-mm=100
+```
+
+如果 `tags` 是系统视频设备，把 `--serial=DA6415777` 换成 `--device=/dev/tags`（假设这是实际设备路径），也可以用 `--device=0` 指定 OpenCV 摄像头索引。离线调试时换成 `--image=frame.png`。这两种模式构建时可将 `BALL_WITH_HIKROBOT` 设为 `OFF`。相机模式默认持续处理，可用 `--frames=100` 限制帧数或按 Ctrl+C 退出。
+
+将 `tags` 相机在实际分辨率、裁剪和对焦设置下的针孔标定结果保存为 OpenCV YAML，例如 `configs/tags_calibration.yaml`。下方数字仅用于说明格式。仓库现有的 `configs/hikrobot_DA6415777.yaml` 是待核验的内参参考，缺少标定分辨率。
+
+```yaml
+%YAML:1.0
+---
+image_width: 640
+image_height: 480
+camera_matrix: !!opencv-matrix
+  rows: 3
+  cols: 3
+  dt: d
+  data: [800., 0., 320., 0., 800., 240., 0., 0., 1.]
+distortion_coefficients: !!opencv-matrix
+  rows: 1
+  cols: 5
+  dt: d
+  data: [0., 0., 0., 0., 0.]
+```
+
+每帧每个成功解算的标签输出一行，包含帧号、标签 ID、标签中心在相机坐标系中的 `x_m,y_m,z_m`、标签到相机的 Rodrigues 旋转向量（弧度）、相机光心在该标签坐标系中的位置（米），以及四角重投影 RMSE（像素）。相机坐标轴为右、下、前。标签坐标原点为标签中心，按解码后的标签朝向取右、上、朝向标签正面外侧。多个标签各自使用自己的原点。加上 `--output=poses.csv` 可将位姿单独保存到 CSV，海康日志仍显示在终端。
