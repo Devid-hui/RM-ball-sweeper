@@ -1,0 +1,25 @@
+# 相机标定记录。校验通过后再作为地面定位输入。
+camera:
+  brand: Hikrobot
+  serial_number: DA6415777
+  lens_focal_length_mm: 3.37
+  lens_f_number: 2.8
+
+rm_intrinsics:
+  status: pending_verification
+  source_file: RM_Vision_2027_fe0ead0/configs/sentry_example.yaml
+  source_camera: omni1
+  camera_matrix:
+    - [967.85421433, 0.0, 302.77130393]
+    - [0.0, 966.38511616, 347.68952457]
+    - [0.0, 0.0, 1.0]
+  distortion_order: [k1, k2, p1, p2, k3]
+  distortion_coefficients: [0.04623507, -0.06477922, -0.00036205, 0.00077141, 0.00880502]
+  calibration_resolution_px: null
+  calibration_roi_px: null
+  calibration_focus: null
+
+camera_to_chassis:
+  status: pending_measurement
+  rotation: null
+  translation_m: null

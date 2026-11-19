@@ -1,7 +1,19 @@
 cmake_minimum_required(VERSION 3.16)
 project(ball_capture LANGUAGES CXX)
 
+option(BALL_BUILD_CAPTURE "Build the camera and video capture tool" ON)
 option(BALL_WITH_HIKROBOT "Build with the migrated Hikrobot USB3 camera driver" OFF)
+
+add_library(ball_collect STATIC tasks/ball_collect/state_machine.cpp)
+target_compile_features(ball_collect PUBLIC cxx_std_17)
+target_include_directories(ball_collect PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+
+add_executable(ball_collector src/collector_main.cpp)
+target_link_libraries(ball_collector PRIVATE ball_collect)
+
+if(NOT BALL_BUILD_CAPTURE)
+  return()
+endif()
 
 find_package(OpenCV 4 REQUIRED COMPONENTS core imgcodecs videoio)
 add_executable(ball_capture src/main.cpp tools/exiter.cpp)

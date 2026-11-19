@@ -62,7 +62,7 @@ int main(int argc, char ** argv)
   const cv::String keys =
     "{help h usage ? | | 查看用法}"
     "{video | | 本地视频文件}"
-    "{serial | | 海康 USB3 相机序列号}"
+    "{serial | DA6415777 | 海康 USB3 相机序列号}"
     "{output | | 输出目录}"
     "{frames | 100 | 最多保存的帧数}"
     "{exposure-ms | 8 | 相机曝光时间，毫秒}"
@@ -77,7 +77,7 @@ int main(int argc, char ** argv)
     }
 
     const auto video = args.get<cv::String>("video");
-    const auto serial = args.get<cv::String>("serial");
+    const auto serial = video.empty() ? args.get<cv::String>("serial") : cv::String();
     const auto output = args.get<cv::String>("output");
     const auto limit = args.get<int>("frames");
     const auto exposure_ms = args.get<double>("exposure-ms");
@@ -87,7 +87,7 @@ int main(int argc, char ** argv)
       args.printErrors();
       return 2;
     }
-    if (video.empty() == serial.empty() || output.empty() || limit < 1) {
+    if (output.empty() || limit < 1) {
       throw std::invalid_argument("请指定 --video 或 --serial、--output 和正数 --frames");
     }
     if (!serial.empty() && (!std::isfinite(exposure_ms) || exposure_ms <= 0 ||
