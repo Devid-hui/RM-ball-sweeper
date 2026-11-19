@@ -242,7 +242,7 @@ int main(int argc, char ** argv)
       detector.detectMarkers(image, corners, ids);
 #endif
       for (std::size_t i = 0; i < ids.size(); ++i) {
-        if (ids[i] >= 0 && ids[i] <= 9) {
+        if (ids[i] >= 0 && ids[i] <= 5) {
           write_pose(output, frame, ids[i], calibration, tag_corners, corners[i]);
         }
       }
