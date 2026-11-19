@@ -1,0 +1,27 @@
+{
+  "weights": "E:\\桌面\\robodata\\pseudo_20261118\\domain_precision_20261119\\selected_model.pt",
+  "source_weights": "E:\\桌面\\robodata\\runs\\baseline\\weights\\best.pt",
+  "sha256": "edf3d308590f4af0decbb5d2981d10a05ec924b473cd3ecd2e3778dfeb2434f0",
+  "confidence": 0.3,
+  "inference_mode": "flip_consensus",
+  "nms_iou": 0.7,
+  "flip_match_iou": 0.5,
+  "imgsz": 960,
+  "validation_target_precision": 0.99,
+  "validation_selection": {
+    "threshold": 0.3,
+    "strategy": "target_precision",
+    "metrics": {
+      "tp": 68,
+      "fp": 0,
+      "fn": 625,
+      "background_images": 1,
+      "background_images_with_detections": 0,
+      "detections": 68,
+      "precision": 1.0,
+      "recall": 0.09812409812409813
+    }
+  },
+  "evaluation_code_sha256": "fa0564fe27d37779c7e1a36ee52c695b999c8192329541f4b258b5a036fa676f",
+  "validation_data_sha256": "050687f3e23fc439485780ff8a7583888eb5a6ec4041be2ce21cc2fbb648147d"
+}
