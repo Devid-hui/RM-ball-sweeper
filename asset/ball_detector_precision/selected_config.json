@@ -3,12 +3,13 @@
   "source_weights": "E:\\桌面\\robodata\\runs\\baseline\\weights\\best.pt",
   "sha256": "edf3d308590f4af0decbb5d2981d10a05ec924b473cd3ecd2e3778dfeb2434f0",
   "confidence": 0.3,
-  "inference_mode": "flip_consensus",
+  "inference_mode": "single",
   "nms_iou": 0.7,
   "flip_match_iou": 0.5,
   "imgsz": 960,
   "validation_target_precision": 0.99,
   "validation_selection": {
+    "inference_mode": "flip_consensus",
     "threshold": 0.3,
     "strategy": "target_precision",
     "metrics": {
