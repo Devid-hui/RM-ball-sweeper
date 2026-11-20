@@ -12,7 +12,7 @@
 
 用户目前要求保留现有 Ubuntu，当前无法更换系统。当前重点是 CPU 参数优化和查明 NPU 初始化失败原因。
 
-用户要求从成熟 RoboMaster 代码迁移时尽量沿用已验证实现，避免无必要修改。新增任务逻辑使用有限状态机，减少深层嵌套，命名清晰。
+用户要求从成熟 RoboMaster 代码迁移时尽量沿用已验证实现，避免无必要修改。当前任务逻辑按输入直接计算速度，使用提前返回，减少深层嵌套。
 
 用户曾讨论 PnP 定位，具体小球定位方法尚未完成。普通球体的 YOLO 矩形框缺少标准 PnP 所需的已知三维点与二维对应关系，需要结合相机标定、地面约束或球体投影模型评估。现有 AprilTag PnP 工具用于标签定位。
 
@@ -48,7 +48,10 @@ Mac 上调试串口最近为 /dev/cu.usbserial-1140，1500000 波特率，8N1。
 
 相机为 Hikrobot MV-CB016-10UC-S，序列号 DA6415777，镜头标注 3.37 mm F2.8。
 相机输出实测为 1440×1080。历史在 USB3 5000M 连接下，内存采集可达到 15.01 FPS（目标 15）和 55.26 FPS（目标 60），PNG 保存约 8.54 FPS。
-最近 6.1 试启动的 lsusb -t 曾显示相机在 480M 总线上，实时联测前重新检查接到 USB3 HOST 并达到 5000M。
+本轮实时联测中，旧采图入口曾保存 3 张图。其后相机在 USB3 的 5000M 链路被系统识别，
+但原采图入口和实时检测入口均出现 MVS USB 读写失败，重新插接后也出现枚举序列号为空。
+最后一轮在 MVS 重试期间收到中断信号，进程被测试超时器终止。
+当前无有效的实时相机 YOLO 帧率，优先恢复 MVS 稳定枚举和取图。
 板上专用 udev 规则为 /etc/udev/rules.d/99-hikrobot-da6415777.rules，用户组 hikrobot-camera。
 configs/hikrobot_DA6415777.yaml 中内参来自旧 RM omni1，仅是待核验参考，缺少原始标定分辨率。相机到车体外参待测。
 驱动板、底盘电机配置和通信协议仍未落实。
@@ -57,20 +60,15 @@ configs/hikrobot_DA6415777.yaml 中内参来自旧 RM omni1，仅是待核验参
 
 - src/main.cpp 为 ball_capture，负责相机采图和视频抽帧。
 - io/hikrobot/ 为迁入的海康驱动。io/camera.hpp 为相机接口。
-- src/collector_main.cpp 为 ball_collector 状态机演示入口，当前使用模拟输入。
-- tasks/ball_collect/state_machine.hpp/.cpp 定义 Idle、Search、Approach、Collect、Fault 五个状态。
+- src/collector_main.cpp 为 ball_collector 决策演示，当前使用模拟输入。
+- tasks/ball_collect/decision.hpp/.cpp 定义当前观测输入和速度决策。故障后由上层撤销运动许可，人工授权后恢复。
+- tasks/ball_detect/detect_cpu.py 复用 ONNX Runtime 会话和缓冲，支持图片及海康相机输入，输出原图检测框和时间戳。
+- RK3576 上相同的 45 张图、800×608 模型和 4 个线程交替回放，旧脚本和新入口输出一致，均约 2.95 FPS。此数据来自图片回放。
 - io/chassis/velocity_command.hpp 定义车体速度接口，前进、左移、逆时针为正，单位 m/s、m/s、rad/s。
-- 任务状态机接收目标状态、图像与底盘反馈新鲜度、收球状态，输出下一状态和速度。
-- 短暂丢球停车，持续丢球回到搜索，运动时数据过期进入 Fault。故障恢复需要复位。
 - tools/apriltag_pnp.cpp 为标签位姿工具，已有独立 CMake 开关。
 - README.md 和 CMakeLists.txt 给出了现有入口与构建方式。
 
-完整“相机→YOLO→小球位置→目标选择→状态机→底盘”链路仍未接通。当前不能声称已经完成自主追球或控制实车。
-
-状态机演示入口可按 README 构建。
-cmake -S . -B build-collector -DBALL_BUILD_CAPTURE=OFF
-cmake --build build-collector -j2
-./build-collector/ball_collector --demo
+定位、目标确认、任务决策与实车底盘之间的集成待完成。
 
 ## 原始模型与数据
 
@@ -192,7 +190,7 @@ Mac 命令环境有过访问 10.0.0.214 返回 No route to host，但 macOS Term
 3. 保留当前 Ubuntu。把 CPU 800 输入作为候选，先核对实际 1 米视频的发现率、连续漏检和新球出现后的发现延迟。
 4. NPU 修复先核对 TF-A 与具体 vendor 内核源码，形成最小兼容修复和可恢复的测试产物。当前症状已有明确上游修复线索，避免重复遍历一般相机、YOLO 或量化问题。
 5. 核对相机内参和安装外参，确定小球地面定位方案。
-6. 按现有模块接入检测结果、目标确认和状态机。收到实际驱动板型号、协议、CAN ID、单位及反馈定义后再接底盘。
+6. 按现有模块接入检测结果、目标确认和运动决策。收到实际驱动板型号、协议、CAN ID、单位及反馈定义后再接底盘。
 7. 记录模型哈希、输入尺寸、后端、阈值、测试集、FPS、功耗温度和未验证项。需要时更新根目录 Excel。
 
 ## 需要用户现场提供或确认的内容

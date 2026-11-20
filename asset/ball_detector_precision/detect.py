@@ -20,11 +20,26 @@ from precision_flip import consensus_boxes
 ROOT = Path(__file__).resolve().parent
 EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp'}
 
+def save_preview(path, result, detected, destination):
+    with Image.open(path) as original:
+        preview=ImageOps.exif_transpose(original).convert('RGB')
+    if preview.size != (result.orig_shape[1],result.orig_shape[0]):
+        raise ValueError(f'预测图像尺寸与预览不一致: {path}')
+    draw=ImageDraw.Draw(preview)
+    for item in detected:
+        x1,y1,x2,y2=item['xyxy']
+        score=item['confidence']
+        draw.rectangle((x1,y1,x2,y2),outline='red',width=2)
+        draw.text((x1,max(0,y1-12)),f'{score:.2f}',fill='yellow')
+    preview.save(destination)
+
+
 def main():
     """读取图片，使用验证集选出的置信度和固定 NMS 进行检测。"""
     parser = argparse.ArgumentParser(description='检测图片中的小球')
     parser.add_argument('--source', required=True, help='图片或图片文件夹')
     parser.add_argument('--output', help='新建结果目录，默认保存在当前项目中')
+    parser.add_argument('--no-preview', action='store_true', help='只输出检测框，跳过绘图和图片保存')
     args = parser.parse_args()
     source = Path(args.source)
     if source.is_file():
@@ -46,8 +61,9 @@ def main():
         raise ValueError('模型检测方式或阈值配置不受支持')
     output = Path(args.output) if args.output else ROOT/'detections'/datetime.now().strftime('%Y%m%d_%H%M%S')
     output.mkdir(parents=True, exist_ok=False)
-    previews = output/'previews'
-    previews.mkdir()
+    previews = None if args.no_preview else output/'previews'
+    if previews is not None:
+        previews.mkdir()
     model = YOLO(str(weights))
     device = 0 if torch.cuda.is_available() else 'cpu'
     records=[]
@@ -81,17 +97,8 @@ def main():
                 detected=[{'xyxy':[float(value) for value in boxes.xyxy[index]],
                            'confidence':float(boxes.conf[index])} for index in indices
                            if float(boxes.conf[index])>=config['confidence']]
-            with Image.open(path) as original:
-                preview=ImageOps.exif_transpose(original).convert('RGB')
-            if preview.size != (result.orig_shape[1],result.orig_shape[0]):
-                raise ValueError(f'预测图像尺寸与预览不一致: {path}')
-            draw=ImageDraw.Draw(preview)
-            for item in detected:
-                x1,y1,x2,y2=item['xyxy']
-                score=item['confidence']
-                draw.rectangle((x1,y1,x2,y2),outline='red',width=2)
-                draw.text((x1,max(0,y1-12)),f'{score:.2f}',fill='yellow')
-            preview.save(previews/path.name)
+            if previews is not None:
+                save_preview(path, result, detected, previews/path.name)
             records.append({'image':str(path),'detections':detected})
     (output/'predictions.json').write_text(json.dumps({'config':config,'results':records},ensure_ascii=False,indent=2),encoding='utf-8')
     print(f'完成 {len(records)} 张图片，结果保存在 {output}')

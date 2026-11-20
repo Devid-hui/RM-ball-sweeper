@@ -23,6 +23,8 @@ public:
     double frame_rate = 30.0, unsigned int transfer_size = 0);
   ~HikRobot() override;
   void read(cv::Mat & img, std::chrono::steady_clock::time_point & timestamp) override;
+  bool read_for(cv::Mat & img, std::chrono::steady_clock::time_point & timestamp,
+                std::chrono::milliseconds timeout);
 
 private:
   struct CameraData

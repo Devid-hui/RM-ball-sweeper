@@ -87,16 +87,20 @@ HikRobot::~HikRobot()
   tools::logger()->info("[{}] HikRobot destructed", device_name_);
 }
 
-void HikRobot::read(cv::Mat & img, std::chrono::steady_clock::time_point & timestamp)
+bool HikRobot::read_for(cv::Mat & img, std::chrono::steady_clock::time_point & timestamp,
+                        std::chrono::milliseconds timeout)
 {
   CameraData data;
+  if (!queue_.try_pop_for(data, timeout)) return false;
+  img = std::move(data.img);
+  timestamp = data.timestamp;
+  return true;
+}
 
+void HikRobot::read(cv::Mat & img, std::chrono::steady_clock::time_point & timestamp)
+{
   while (true) {
-    if (queue_.try_pop_for(data, 100ms)) {
-      img = data.img;
-      timestamp = data.timestamp;
-      return;
-    }
+    if (read_for(img, timestamp, 100ms)) return;
 
     if (tools::exiting()) {
       img.release();

@@ -33,6 +33,10 @@ inline std::string hik_error_name(unsigned int ret)
       return "MV_E_NOENOUGH_BUF";
     case MV_E_LOAD_LIBRARY:
       return "MV_E_LOAD_LIBRARY";
+    case MV_E_USB_READ:
+      return "MV_E_USB_READ";
+    case MV_E_USB_WRITE:
+      return "MV_E_USB_WRITE";
     default:
       return "UNKNOWN";
   }

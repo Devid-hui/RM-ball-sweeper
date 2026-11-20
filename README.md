@@ -6,29 +6,26 @@
 
 ```text
 src/main.cpp                  ball_capture，现场采图或从视频抽帧
-src/collector_main.cpp        ball_collector，运行状态机演示
+src/collector_main.cpp        ball_collector，模拟观测决策演示
 io/hikrobot/                  从原 RM 工程迁入的海康相机驱动
 io/chassis/velocity_command.hpp  车体速度接口，供任务层和底盘通信共用
-tasks/ball_collect/           五状态的采球状态机
+tasks/ball_collect/           根据当前观测和安全条件计算速度
+tasks/ball_detect/detect_cpu.py  CPU YOLO 采球检测入口
 tools/                        日志、退出、队列工具和 AprilTag 位姿解算
 ```
 
-状态机沿用 RM 工程把任务状态集中处理的做法。采球任务用
-`Idle`、`Search`、`Approach`、`Collect` 和 `Fault` 五个状态。
-每次调用 `step()` 输入当前状态和观测，返回下一状态和一条速度指令。
-状态切换时输出零速度，短暂丢球时保持接近状态并停车，持续丢球时回到搜索。
-运动中相机或底盘反馈过期会进入故障停机。两路反馈恢复后需要手动复位。
+任务层的 `decide(input)` 每次根据当前输入返回速度和原因。急停、收球失败、
+缺少运动许可或反馈过期时输出零速度。目标短暂丢失时停车，确认失去目标后恢复搜索。
+目标对齐后执行收球，机构报告完成时停车。
 
-接入实际数据时，在任务层添加 YOLO 推理、地面定位和速度计算。
-推理层输出原图球心和帧时间戳，目标确认逻辑按不同帧更新
-`TargetStatus`。控制循环根据观测和反馈的时间戳设置
-`vision_fresh` 和 `chassis_fresh`。收球机构的完成或超时由上层反馈为
-`CollectionStatus`。底盘协议确认后，在 `io/chassis/` 接入发送和反馈。
-速度指令在软件内部约定前进、左移、逆时针为正，单位为 `m/s`、`m/s`、`rad/s`。
+运动许可由上层持续提供。收到 `revoke_motion_authorization` 后，上层立即撤销许可，
+确认故障解除并收到人工授权后才重新允许移动。
+接入实车时，目标确认与地面定位模块提供观测和速度建议，底盘协议接入 `io/chassis/`。
+速度约定前进、左移、逆时针为正，单位为 `m/s`、`m/s`、`rad/s`。
 
-## 运行状态机演示
+## 运行决策演示
 
-只构建任务入口时需要 C++17 编译器和 CMake。演示使用模拟输入并打印状态和速度，便于在没有驱动板的电脑上检查逻辑。
+只构建任务入口时需要 C++17 编译器和 CMake。演示使用模拟输入并打印决策原因和速度。
 
 ```bash
 cmake -S . -B build-collector -DBALL_BUILD_CAPTURE=OFF
@@ -36,13 +33,11 @@ cmake --build build-collector -j2
 ./build-collector/ball_collector --demo
 ```
 
-预期能看到搜索、接近、收球和恢复搜索。模拟图像过期后，进入 `Fault` 并输出零速度。恢复图像后，演示会在手动复位事件到来时回到 `Idle`。
-
 ## 采球车图像采集
 
 第一阶段支持在 RK3576 Ubuntu 上从单台海康 USB3 工业相机采图，也支持从本地视频抽取连续帧。程序保存原分辨率 PNG 和 `frames.csv`，可直接检查 17 mm 小球的可见范围，或用这些图片做检测标注。
 
-`io/hikrobot/`、`io/camera.hpp`、所需的 `tools/` 文件和许可证来自 RoboMaster 源码，按原文件复制。新项目的 `src/camera_base.cpp` 提供相机基类的原有默认实现，以便独立链接海康驱动。
+`io/hikrobot/`、`io/camera.hpp`、所需的 `tools/` 文件和许可证来自 RoboMaster 源码。驱动提供限时读取，以便实时检测入口等待新帧并响应 Ctrl+C。新项目的 `src/camera_base.cpp` 提供相机基类的原有默认实现，以便独立链接海康驱动。
 
 ## Ubuntu 上连接海康相机
 
@@ -68,6 +63,36 @@ cmake --build build -j2
 ```
 
 视频时间由 OpenCV 视频后端提供。每次使用新的输出目录，保留不同场次的数据。
+
+## CPU YOLO 检测
+
+从项目根目录运行。Python 环境需要 NumPy、OpenCV 和 ONNX Runtime。
+使用已经装好这些依赖的板端虚拟环境，或者在自己的 Python 环境中安装
+`numpy opencv-python-headless onnxruntime`。
+
+```bash
+python tasks/ball_detect/detect_cpu.py --images test/picture/*.jpg
+```
+
+实时检测在 RK3576 上复用海康驱动，只取队列中的最新帧。构建时需要
+`libopencv-dev libfmt-dev libspdlog-dev pybind11-dev python3-dev` 和 CMake 3.18 以上。
+下面用板上的现有 Python 环境，按实际路径调整。
+
+```bash
+. "$HOME/.venvs/ball-yolo-bench/bin/activate"
+cmake -S . -B build-hik -DBALL_WITH_HIKROBOT=ON -DBALL_BUILD_YOLO_CAMERA=ON \
+  -DPython3_EXECUTABLE="$(command -v python)" -DCMAKE_BUILD_TYPE=Release
+cmake --build build-hik -j2
+PYTHONPATH="$PWD/build-hik" python tasks/ball_detect/detect_cpu.py \
+  --serial DA6415777 --frames 60 --output ball-detections.jsonl
+```
+
+结果每帧一行，`xyxy` 是原图像素坐标，`confidence` 是置信度。
+`detect_ms` 包含预处理、推理和后处理，`frame_age_ms` 从驱动收到帧开始计时。
+默认使用配置中的 4 个推理线程，测试时可加 `--threads 8` 对照帧率和 CPU 占用。
+省略 `--frames` 时持续运行，按 Ctrl+C 退出。
+实时模式使用 `--output` 将检测结果和驱动日志写到各自的输出位置。
+旧的 PyTorch 离线脚本可加 `--no-preview`，只生成检测框记录。
 
 ## AprilTag 位姿解算
 
