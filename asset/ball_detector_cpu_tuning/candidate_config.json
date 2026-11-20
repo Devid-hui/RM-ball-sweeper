@@ -1,0 +1,14 @@
+{
+  "status": "candidate",
+  "input_height": 608,
+  "input_width": 800,
+  "batch": 1,
+  "precision": "FP32",
+  "runtime": "onnxruntime",
+  "threads": 4,
+  "confidence": 0.3,
+  "nms_iou": 0.7,
+  "sha256": "f756607ed4c4936f3087bd2835cf4e77818252d824d28f17e25b6a556e5792dc",
+  "original_model_sha256": "edf3d308590f4af0decbb5d2981d10a05ec924b473cd3ecd2e3778dfeb2434f0",
+  "notes": "Threshold 0.20 is a comparison candidate. Accuracy used 45 images, benchmark used memory replay. Live camera and 1m moving scenes remain untested."
+}

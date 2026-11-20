@@ -1,0 +1,21 @@
+description: YOLO26n ball detector for RK3576 FP16
+author: Ultralytics
+date: '2026-11-20T15:12:16.016662+08:00'
+version: 8.4.120
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: detect
+head: Detect
+batch: 1
+imgsz:
+- 736
+- 960
+names:
+  0: ball
+args:
+  batch: 1
+  quantize: 16
+  name: rk3576
+channels: 3
+end2end: false
