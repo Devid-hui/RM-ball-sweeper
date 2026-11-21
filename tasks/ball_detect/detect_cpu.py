@@ -5,26 +5,36 @@ import json
 import sys
 import time
 from contextlib import ExitStack
+from itertools import islice
 from pathlib import Path
 
 import cv2
 import numpy as np
 import onnxruntime as ort
 
+if __package__:
+    from .ground_position import GroundProjector
+else:
+    from ground_position import GroundProjector
+
 
 ASSETS = Path(__file__).resolve().parents[2] / "asset" / "ball_detector_cpu_tuning"
+PROFILES = {"full": "candidate_config.json", "floor-roi": "floor_roi_config.json"}
 
 
 class BallDetector:
     """每个推理线程拥有一个实例，依次处理 BGR8 图像。"""
 
-    def __init__(self, asset_dir=ASSETS, *, threads=None):
-        config = json.loads((asset_dir / "candidate_config.json").read_text())
-        model = asset_dir / "ball_800.onnx"
+    def __init__(self, asset_dir=ASSETS, *, threads=None, profile="full"):
+        config = json.loads((asset_dir / PROFILES[profile]).read_text())
+        model = asset_dir / config.get("model", "ball_800.onnx")
         if hashlib.sha256(model.read_bytes()).hexdigest() != config["sha256"]:
             raise ValueError("模型和参数文件的 SHA256 不匹配")
         self.height, self.width = config["input_height"], config["input_width"]
         self.confidence, self.iou = config["confidence"], config["nms_iou"]
+        self.roi_top_fraction = config.get("roi_top_fraction", 0.0)
+        if not 0 <= self.roi_top_fraction < 1:
+            raise ValueError("顶部裁剪比例必须在 [0, 1) 内")
         threads = config["threads"] if threads is None else threads
         if threads < 1:
             raise ValueError("线程数必须为正整数")
@@ -46,13 +56,19 @@ class BallDetector:
                                  self.predictions.ctypes.data)
         self.last_region = None
 
+    def roi_top(self, image_height):
+        return int(image_height * self.roi_top_fraction)
+
     def detect(self, image):
         if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3 or not image.size:
             raise ValueError("输入必须是非空 BGR8 图像")
         image_height, image_width = image.shape[:2]
-        scale = min(self.width / image_width, self.height / image_height)
+        roi_top = self.roi_top(image_height)
+        image = image[roi_top:]
+        cropped_height = image_height - roi_top
+        scale = min(self.width / image_width, self.height / cropped_height)
         resized_width = max(1, round(image_width * scale))
-        resized_height = max(1, round(image_height * scale))
+        resized_height = max(1, round(cropped_height * scale))
         left = (self.width - resized_width) // 2
         top = (self.height - resized_height) // 2
         region = (left, top, resized_width, resized_height)
@@ -69,7 +85,8 @@ class BallDetector:
         valid = rows[(rows[:, 4] >= self.confidence) & (rows[:, 5] == 0)]
         boxes, scores = valid[:, :4], valid[:, 4]
         boxes[:, ::2] = np.clip((boxes[:, ::2] - left) / scale, 0, image_width)
-        boxes[:, 1::2] = np.clip((boxes[:, 1::2] - top) / scale, 0, image_height)
+        # 还原到原图坐标系，使定位模块可继续使用原图的相机标定。
+        boxes[:, 1::2] = np.clip((boxes[:, 1::2] - top) / scale, 0, cropped_height) + roi_top
         xywh = np.column_stack((boxes[:, :2], boxes[:, 2:] - boxes[:, :2]))
         keep = np.asarray(cv2.dnn.NMSBoxes(xywh.tolist(), scores.tolist(), 0.0, self.iou),
                           dtype=int).ravel()
@@ -86,9 +103,12 @@ def camera_frames(serial):
             yield sample
 
 
-def image_frames(paths):
+def image_frames(paths, *, raw_orientation=False):
+    flags = cv2.IMREAD_COLOR
+    if raw_orientation:
+        flags |= cv2.IMREAD_IGNORE_ORIENTATION
     for path in paths:
-        image = cv2.imread(str(path))
+        image = cv2.imread(str(path), flags)
         if image is None:
             raise ValueError(f"无法读取 {path}")
         yield image, None
@@ -99,21 +119,31 @@ def main():
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--serial", help="海康相机序列号")
     source.add_argument("--images", type=Path, nargs="+", help="一个或多个图片文件")
+    parser.add_argument("--profile", choices=PROFILES, default="full",
+                        help="检测配置。默认 full 全图，floor-roi 只检测画面地面区域")
     parser.add_argument("--threads", type=int, help="覆盖模型配置中的 CPU 推理线程数")
     parser.add_argument("--frames", type=int, help="最多处理多少帧，实时模式默认持续运行")
     parser.add_argument("--output", type=Path, help="写入新的 JSONL 文件，每帧一行")
+    parser.add_argument("--ground-calibration", type=Path, help="实测标定 YAML，启用地面小球定位")
+    parser.add_argument("--max-distance-m", type=float, default=1.0, help="定位范围，距车体原点的米数")
     args = parser.parse_args()
     if args.frames is not None and args.frames < 1:
         parser.error("--frames 必须为正整数")
     if args.threads is not None and args.threads < 1:
         parser.error("--threads 必须为正整数")
+    try:
+        projector = (GroundProjector(args.ground_calibration, args.max_distance_m)
+                     if args.ground_calibration else None)
+    except ValueError as error:
+        parser.error(str(error))
     cv2.setNumThreads(1)
-    detector = BallDetector(threads=args.threads)
-    stream = camera_frames(args.serial) if args.serial else image_frames(args.images)
+    detector = BallDetector(threads=args.threads, profile=args.profile)
+    stream = (camera_frames(args.serial) if args.serial
+              else image_frames(args.images, raw_orientation=projector is not None))
     with ExitStack() as stack:
         stack.callback(stream.close)
         output = stack.enter_context(args.output.open("x")) if args.output else sys.stdout
-        for number, (image, received_ns) in enumerate(stream, 1):
+        for number, (image, received_ns) in enumerate(islice(stream, args.frames), 1):
             start = time.monotonic_ns()
             boxes, scores = detector.detect(image)
             end = time.monotonic_ns()
@@ -124,9 +154,11 @@ def main():
                                       for box, score in zip(boxes, scores)])
             if args.images:
                 record["image"] = str(args.images[number - 1])
+            if detector.roi_top_fraction:
+                record["roi_top_px"] = detector.roi_top(record["height"])
+            if projector is not None:
+                projector.locate(record)
             print(json.dumps(record), file=output, flush=True)
-            if number == args.frames:
-                break
 
 
 if __name__ == "__main__":

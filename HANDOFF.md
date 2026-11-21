@@ -14,7 +14,7 @@
 
 用户要求从成熟 RoboMaster 代码迁移时尽量沿用已验证实现，避免无必要修改。当前任务逻辑按输入直接计算速度，使用提前返回，减少深层嵌套。
 
-用户曾讨论 PnP 定位，具体小球定位方法尚未完成。普通球体的 YOLO 矩形框缺少标准 PnP 所需的已知三维点与二维对应关系，需要结合相机标定、地面约束或球体投影模型评估。现有 AprilTag PnP 工具用于标签定位。
+用户曾讨论 PnP 定位。小球定位使用球心视线与距地 8.5 mm 的平面求交。现有 AprilTag PnP 工具用于标签定位。
 
 ## 本地资源
 
@@ -53,22 +53,24 @@ Mac 上调试串口最近为 /dev/cu.usbserial-1140，1500000 波特率，8N1。
 最后一轮在 MVS 重试期间收到中断信号，进程被测试超时器终止。
 当前无有效的实时相机 YOLO 帧率，优先恢复 MVS 稳定枚举和取图。
 板上专用 udev 规则为 /etc/udev/rules.d/99-hikrobot-da6415777.rules，用户组 hikrobot-camera。
-configs/hikrobot_DA6415777.yaml 中内参来自旧 RM omni1，仅是待核验参考，缺少原始标定分辨率。相机到车体外参待测。
-驱动板、底盘电机配置和通信协议仍未落实。
+configs/hikrobot_DA6415777.yaml 复用同序列号 RM omni1 内参与畸变，暂以当前采集画幅 1440×1080 试跑。原始标定画幅待核验。安装参数为横纵偏移零、光心高 0.10 m、三个角度零。
+驱动板、底盘电机配置和通信协议待确认。configs/chassis_link.yaml 记录用户给定的临时速率 1500000。
 
 ## 当前代码结构
 
 - src/main.cpp 为 ball_capture，负责相机采图和视频抽帧。
 - io/hikrobot/ 为迁入的海康驱动。io/camera.hpp 为相机接口。
 - src/collector_main.cpp 为 ball_collector 决策演示，当前使用模拟输入。
-- tasks/ball_collect/decision.hpp/.cpp 定义当前观测输入和速度决策。故障后由上层撤销运动许可，人工授权后恢复。
+- tasks/ball_collect/decision.hpp/.cpp 按观测决定搜索、对准或推送。前叉在车体原点前方约 0.06 m，宽约 0.20 m。靠墙丢标停车，导航上报到达停车点时停止。停车后的后退和转向由后续导航执行。
 - tasks/ball_detect/detect_cpu.py 复用 ONNX Runtime 会话和缓冲，支持图片及海康相机输入，输出原图检测框和时间戳。
 - RK3576 上相同的 45 张图、800×608 模型和 4 个线程交替回放，旧脚本和新入口输出一致，均约 2.95 FPS。此数据来自图片回放。
+- CPU 检测入口新增可选 `--profile floor-roi`，用 800×512 ONNX 处理裁去顶部 15% 的画面。Mac 上的速度和检测对照见 README，板端验证待完成。
 - io/chassis/velocity_command.hpp 定义车体速度接口，前进、左移、逆时针为正，单位 m/s、m/s、rad/s。
 - tools/apriltag_pnp.cpp 为标签位姿工具，已有独立 CMake 开关。
 - README.md 和 CMakeLists.txt 给出了现有入口与构建方式。
 
-定位、目标确认、任务决策与实车底盘之间的集成待完成。
+检测入口可经 `--ground-calibration` 输出车体坐标和当帧最近的候选球。
+棋盘格标定入口是 `tools/calibrate_ball_camera.py`。定位和候选选择已用模拟标定验证，实车定位误差、跨帧目标确认、运动建议和底盘接入仍待完成。
 
 ## 原始模型与数据
 

@@ -1,0 +1,15 @@
+{
+  "status": "candidate",
+  "model": "ball_floor_800x512.onnx",
+  "input_height": 512,
+  "input_width": 800,
+  "roi_top_fraction": 0.15,
+  "batch": 1,
+  "precision": "FP32",
+  "runtime": "onnxruntime",
+  "threads": 4,
+  "confidence": 0.3,
+  "nms_iou": 0.7,
+  "sha256": "7c8ffb8ab8901dec5df88ff743aa5ea6f773e1c3453ec9749bab10fcc3b54c14",
+  "original_model_sha256": "edf3d308590f4af0decbb5d2981d10a05ec924b473cd3ecd2e3778dfeb2434f0"
+}

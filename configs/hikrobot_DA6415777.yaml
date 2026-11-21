@@ -1,25 +1,27 @@
-# 相机标定记录。校验通过后再作为地面定位输入。
-camera:
-  brand: Hikrobot
-  serial_number: DA6415777
-  lens_focal_length_mm: 3.37
-  lens_f_number: 2.8
-
-rm_intrinsics:
-  status: pending_verification
-  source_file: RM_Vision_2027_fe0ead0/configs/sentry_example.yaml
-  source_camera: omni1
-  camera_matrix:
-    - [967.85421433, 0.0, 302.77130393]
-    - [0.0, 966.38511616, 347.68952457]
-    - [0.0, 0.0, 1.0]
-  distortion_order: [k1, k2, p1, p2, k3]
-  distortion_coefficients: [0.04623507, -0.06477922, -0.00036205, 0.00077141, 0.00880502]
-  calibration_resolution_px: null
-  calibration_roi_px: null
-  calibration_focus: null
-
+%YAML:1.0
+---
+# RM_Vision_2027_fe0ead0/configs/sentry_example.yaml 的 omni1，序列号 DA6415777。
+# 尺寸按当前采集画幅填写，RM 未标注这组内参所用的分辨率、裁剪和缩放。
+image_width: 1440
+image_height: 1080
+camera_matrix: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [967.85421433, 0., 302.77130393,
+          0., 966.38511616, 347.68952457,
+          0., 0., 1.]
+distortion_coefficients: !!opencv-matrix
+   rows: 1
+   cols: 5
+   dt: d
+   data: [0.04623507, -0.06477922, -0.00036205, 0.00077141, 0.00880502]
 camera_to_chassis:
-  status: pending_measurement
-  rotation: null
-  translation_m: null
+   x_m: 0.
+   y_m: 0.
+   z_m: 0.10
+   yaw_deg: 0.
+   pitch_down_deg: 0.
+   roll_deg: 0.
+# 搜索新球时避开推球口前缘之后的球，米。装车后用实测调整。
+minimum_candidate_forward_m: 0.06

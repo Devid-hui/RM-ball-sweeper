@@ -1,0 +1,3 @@
+# 待确认驱动板型号及固件。此值仅记录用户给定的临时速率，不用于初始化设备。
+transport: null
+provisional_bit_rate: 1500000

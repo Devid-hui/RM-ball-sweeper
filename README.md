@@ -11,17 +11,20 @@ io/hikrobot/                  从原 RM 工程迁入的海康相机驱动
 io/chassis/velocity_command.hpp  车体速度接口，供任务层和底盘通信共用
 tasks/ball_collect/           根据当前观测和安全条件计算速度
 tasks/ball_detect/detect_cpu.py  CPU YOLO 采球检测入口
+tasks/ball_detect/ground_position.py  小球地面定位和当帧目标选择
+tools/calibrate_ball_camera.py   用棋盘格照片求相机内参
 tools/                        日志、退出、队列工具和 AprilTag 位姿解算
 ```
 
-任务层的 `decide(input)` 每次根据当前输入返回速度和原因。急停、收球失败、
-缺少运动许可或反馈过期时输出零速度。目标短暂丢失时停车，确认失去目标后恢复搜索。
-目标对齐后执行收球，机构报告完成时停车。
+任务层按当前观测返回速度和原因。搜索时选前方可接近的小球，车头对准球与收球区的推送方向后请求开始推球。
+推球口在车体原点前方约 0.06 m，宽约 0.20 m。球心与前叉中线的横向偏差需落在扣除球半径后的宽度内。
+推送任务由导航提供，球进入前叉后即使离开画面也可继续推送。
+靠墙时墙标过期则停车，恢复观测后可继续。到达墙边停车点时输出零速度。
+S 形路线、把墙标位姿换算成停车点以及停车后的后退和 90° 转向，待接入导航和底盘反馈。
 
-运动许可由上层持续提供。收到 `revoke_motion_authorization` 后，上层立即撤销许可，
-确认故障解除并收到人工授权后才重新允许移动。
-接入实车时，目标确认与地面定位模块提供观测和速度建议，底盘协议接入 `io/chassis/`。
+急停或视觉与底盘反馈过期时，输出零速度并撤销运动许可。上层确认故障解除并收到人工授权后再恢复运动。
 速度约定前进、左移、逆时针为正，单位为 `m/s`、`m/s`、`rad/s`。
+底盘链路待识别。`configs/chassis_link.yaml` 记录临时速率 1500000，需先确定实际接口和速率对应的阶段。
 
 ## 运行决策演示
 
@@ -52,7 +55,7 @@ cmake --build build-hik -j2
 
 `--exposure-ms=8 --gain=8 --fps=15` 是采集入口的起始参数，可结合实际光照和相机型号调整。文件中的时间从第一张保存的图像开始，来自采集回调的单调时钟。保存图片慢于相机取帧时，原驱动会保留最新帧，连续保存的图片可能跳过部分相机帧。看不到首帧时，先检查 MVS 是否可枚举相机及当前用户是否有设备访问权限，再对照程序的相机日志。按 Ctrl+C 可退出。
 
-标定参考放在 `configs/hikrobot_DA6415777.yaml`。内参来自 RM 的 `sentry_example.yaml` 中对应的 `omni1`。接入地面定位前，先确认标定分辨率、裁剪和镜头对焦状态与当前采集一致，并用棋盘格或已知点位复核。相机到车体的外参按采球车实际安装重新测量。
+`configs/hikrobot_DA6415777.yaml` 复用 RM 中同序列号 `omni1` 的内参与畸变，安装参数按当前默认值写入。RM 未注明该矩阵的标定画幅，配置暂以实拍画幅 1440×1080 运行。用已知距离和左右偏移验证后再用于实车控制。
 
 ## 从本地视频提取图片
 
@@ -94,6 +97,66 @@ PYTHONPATH="$PWD/build-hik" python tasks/ball_detect/detect_cpu.py \
 实时模式使用 `--output` 将检测结果和驱动日志写到各自的输出位置。
 旧的 PyTorch 离线脚本可加 `--no-preview`，只生成检测框记录。
 
+### 地面区域加速配置
+
+`--profile floor-roi` 去掉原图顶部 15%，用同一组权重导出的 800×512 ONNX 推理。
+对 1440×1080 原图，程序保留画面全宽，小球缩放比例与全图配置接近。
+检测框会还原为原图坐标，`roi_top_px` 记录裁剪边界，碰到该边界的框跳过地面定位。
+
+```bash
+python tasks/ball_detect/detect_cpu.py --images test/picture/*.jpg --profile floor-roi
+```
+
+Mac M1 Pro 上分别用 4 线程交替回放同一套 45 张标注图，每配置计时 90 帧。
+检测匹配 IoU 为 0.50，置信度门槛为 0.30。
+
+| 配置 | 平均检测耗时 | P95 检测耗时 | 正确检测 | 误检 | 命中有球画面 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `full` 800×608 | 44.34 ms | 47.08 ms | 180 | 41 | 33/36 |
+| `floor-roi` 800×512 | 37.17 ms | 39.17 ms | 177 | 53 | 33/36 |
+
+默认使用 `full`。固定测试集中所有标注球均在所选裁剪范围内。
+启用地面区域配置前，用相机实际安装姿态检查顶部裁剪线以下是否覆盖 1 米工作范围。
+RK3576 上的帧率和温度待实测。
+
+## 地面小球定位
+
+现有海康相机可用 `--ground-calibration configs/hikrobot_DA6415777.yaml` 试跑。地面配置会在选择新目标时跳过前向距离小于 0.06 m 的球。推送逻辑可继续沿已确认的路径前进。
+
+需要另行标定相机时，用车上这台相机以实际工作时的分辨率、裁剪和焦点采集棋盘格照片。
+建议采集 10–20 张，改变棋盘角度和距离，并让棋盘覆盖画面四角。
+内角点按格线交点计数。下面以横向 9、纵向 6 个内角点、实测格宽 20 mm 为例。
+
+```bash
+python tools/calibrate_ball_camera.py --images calibration/*.png \
+  --columns 9 --rows 6 --square-mm 20 --output configs/ball_ground.yaml
+```
+
+在生成文件末尾追加以下字段，并把每个 `待测` 都替换成实测数字。
+车体原点可取两驱动轮轴线中点在地面的投影。选定后，相机和收球口都以同一原点测量。
+水平且朝正前的相机三个角度为零。向左转为正偏航，镜头向下为正俯仰，画面的左侧抬高为正横滚。
+
+```yaml
+camera_to_chassis:
+   x_m: 待测             # 相机光心相对原点的前向距离
+   y_m: 待测             # 相机光心相对原点的左向距离
+   z_m: 待测             # 相机光心离地高度
+   yaw_deg: 待测
+   pitch_down_deg: 待测
+   roll_deg: 待测
+```
+
+```bash
+python tasks/ball_detect/detect_cpu.py --images test/picture/*.jpg \
+  --ground-calibration configs/ball_ground.yaml
+```
+
+实拍定位时也可把同一参数加到海康检测命令。程序先校正框中心的镜头畸变，
+再将这条视线与距地面 8.5 mm 的球心平面求交。`position_m` 给出车体前向和左向坐标，
+`target_candidate` 指向当帧离车体原点最近的有效框。边缘被裁断的框、车体后方及范围外的球
+仍出现在检测结果中，位置字段为 `null`。有效范围默认 1 米，可用 `--max-distance-m` 调整。
+用安装后拍到的已知球位核对定位误差，尤其是收球口附近及最远工作距离。
+
 ## AprilTag 位姿解算
 
 `apriltag_pnp` 对 `tag36h11` 的 ID 0–5 解算位姿，对应 `tag36h11 IDs 0-9.pdf` 的前 6 页。按实际大小打印，保留四周白边，然后用尺量黑色外边框的边长，单位为毫米。PDF 中的设计边长约 100 mm，命令里的 `--tag-size-mm` 以实测为准。同一批处理的标签应使用相同边长。
@@ -108,7 +171,7 @@ cmake --build build-tags --target apriltag_pnp -j2
 
 如果 `tags` 是系统视频设备，把 `--serial=DA6415777` 换成 `--device=/dev/tags`（假设这是实际设备路径），也可以用 `--device=0` 指定 OpenCV 摄像头索引。离线调试时换成 `--image=frame.png`。这两种模式构建时可将 `BALL_WITH_HIKROBOT` 设为 `OFF`。相机模式默认持续处理，可用 `--frames=100` 限制帧数或按 Ctrl+C 退出。
 
-将 `tags` 相机在实际分辨率、裁剪和对焦设置下的针孔标定结果保存为 OpenCV YAML，例如 `configs/tags_calibration.yaml`。下方数字仅用于说明格式。仓库现有的 `configs/hikrobot_DA6415777.yaml` 是待核验的内参参考，缺少标定分辨率。
+将 `tags` 相机在实际分辨率、裁剪和对焦设置下的针孔标定结果保存为 OpenCV YAML，例如 `configs/tags_calibration.yaml`。下方数字仅用于说明格式。仓库现有的 `configs/hikrobot_DA6415777.yaml` 也可用于这台海康相机的离线标签解算，原始标定画幅待核验。
 
 ```yaml
 %YAML:1.0
