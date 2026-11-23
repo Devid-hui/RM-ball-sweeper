@@ -1,3 +1,14 @@
-# 待确认驱动板型号及固件。此值仅记录用户给定的临时速率，不用于初始化设备。
-transport: null
-provisional_bit_rate: 1500000
+# 来源：ROCK4D_OpenRF1_通信配置指南_20261122 的 verified_configuration.json。
+transport: uart
+controller: OpenRF1
+rock_overlay: UART4-M1
+device: /dev/ttyS4
+openrf1_uart: USART2
+baud_rate: 115200
+data_bits: 8
+parity: none
+stop_bits: 1
+flow_control: none
+
+# 已验证基本串口往返。速度指令、轮端反馈和断联停车协议待定义。
+protocol: openrf1_uart2_echo

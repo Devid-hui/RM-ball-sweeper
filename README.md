@@ -24,7 +24,7 @@ S 形路线、把墙标位姿换算成停车点以及停车后的后退和 90° 
 
 急停或视觉与底盘反馈过期时，输出零速度并撤销运动许可。上层确认故障解除并收到人工授权后再恢复运动。
 速度约定前进、左移、逆时针为正，单位为 `m/s`、`m/s`、`rad/s`。
-底盘链路待识别。`configs/chassis_link.yaml` 记录临时速率 1500000，需先确定实际接口和速率对应的阶段。
+ROCK 4D 到 OpenRF1 的串口参数见 `configs/chassis_link.yaml`。
 
 ## 运行决策演示
 
@@ -35,6 +35,21 @@ cmake -S . -B build-collector -DBALL_BUILD_CAPTURE=OFF
 cmake --build build-collector -j2
 ./build-collector/ball_collector --demo
 ```
+
+## OpenRF1 串口联通检查
+
+通信指南已验证 ROCK 4D 的 UART4-M1（`/dev/ttyS4`）到 OpenRF1 USART2 的基本双向通信。
+应用串口为 115200、8N1、无流控。两板使用 3.3 V TTL，ROCK 物理 11（TX）接 RX2，
+物理 15（RX）接 TX2，物理 9（GND）接 GND。两板分别供电。
+
+在 ROCK 4D 上关闭占用串口的其他程序，再从项目根目录运行。
+
+```bash
+python3 tools/check_openrf1_uart.py
+```
+
+检查程序向测试固件发送 `PING\n` 与 `HELLO_123\n`，预期分别收到 `PONG` 和 `RX:HELLO_123`。
+这一步验证串口收发。速度指令、轮速与编码器反馈、故障状态和失联停车需要在电机控制固件中实现。
 
 ## 采球车图像采集
 
