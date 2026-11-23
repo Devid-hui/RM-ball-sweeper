@@ -38,6 +38,8 @@ cmake --build build-collector -j2
 
 ## OpenRF1 串口联通检查
 
+当前实板使用[四路编码器与单轮点动固件](firmware/openrf1/README.md)，用 `PING` 检查连接，用 `ENC` 读取计数。下面的脚本适用于早期 UART2 回显固件。
+
 通信指南已验证 ROCK 4D 的 UART4-M1（`/dev/ttyS4`）到 OpenRF1 USART2 的基本双向通信。
 应用串口为 115200、8N1、无流控。两板使用 3.3 V TTL，ROCK 物理 11（TX）接 RX2，
 物理 15（RX）接 TX2，物理 9（GND）接 GND。两板分别供电。
