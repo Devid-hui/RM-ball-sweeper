@@ -9,6 +9,7 @@ src/main.cpp                  ball_capture，现场采图或从视频抽帧
 src/collector_main.cpp        ball_collector，模拟观测决策演示
 io/hikrobot/                  从原 RM 工程迁入的海康相机驱动
 io/chassis/velocity_command.hpp  车体速度接口，供任务层和底盘通信共用
+io/chassis/mecanum_kinematics.*   车体速度与四轮角速度的换算
 tasks/ball_collect/           根据当前观测和安全条件计算速度
 tasks/ball_detect/detect_cpu.py  CPU YOLO 采球检测入口
 tasks/ball_detect/ground_position.py  小球地面定位和当帧目标选择
@@ -16,7 +17,10 @@ tools/calibrate_ball_camera.py   用棋盘格照片求相机内参
 tools/                        日志、退出、队列工具和 AprilTag 位姿解算
 ```
 
-任务层按当前观测返回速度和原因。搜索时选前方可接近的小球，车头对准球与收球区的推送方向后请求开始推球。
+实车采球入口是 `tasks/ball_collect/run.py`。图像回放、相机预演和实车共用同一个导航决策。看见球但没有墙标时，按球在车体前方、左方的位置低速平移，保持车头朝向。默认平移上限为 0.05 m/s，球心距前叉前缘约 8–9 cm 时停车等墙标。两个参数在 `configs/collector.json` 中，分别是 `visual_approach_speed_m_s` 和 `visual_standoff_m`，停车判定含 1 cm 容差。
+墙标连续两帧确认同一球在场地中的位置后，小车才对准投放区。无墙标时丢球、推送或退回途中丢标都会停车。
+
+下方 C++ 决策演示使用模拟输入。搜索时选前方可接近的小球，车头对准球与收球区的推送方向后请求开始推球。
 推球口在车体原点前方约 0.06 m，宽约 0.20 m。球心与前叉中线的横向偏差需落在扣除球半径后的宽度内。
 推送任务由导航提供，球进入前叉后即使离开画面也可继续推送。
 靠墙时墙标过期则停车，恢复观测后可继续。到达墙边停车点时输出零速度。
@@ -35,6 +39,20 @@ cmake -S . -B build-collector -DBALL_BUILD_CAPTURE=OFF
 cmake --build build-collector -j2
 ./build-collector/ball_collector --demo
 ```
+
+## 麦克纳姆轮解算
+
+解算采用 X 型滚子布局，车体原点取四轮中心。输入依次为轮半径、轴距、轮距（米），以及车体的前进、左移、逆时针速度（m/s、m/s、rad/s）。轴距和轮距填写完整的轮心间距。输出按前左、前右、后左、后右排列，单位为 rad/s，各轮向车头滚动时为正。
+
+```bash
+# 用示例尺寸验证纯左移，预期四轮依次为 -4、4、4、-4 rad/s
+./build-collector/ball_collector --mecanum 0.05 0.30 0.20 0 0.20 0
+# 给模拟决策追加四轮角速度，最后的 6 是可选轮速上限（rad/s）
+./build-collector/ball_collector --demo 0.05 0.30 0.20 6
+ctest --test-dir build-collector --output-on-failure
+```
+
+指定上限时，超限会按同一个比例缩放四轮，保留前进、横移和转向的比例。实车尺寸请使用实测值。这两个入口只打印解算结果。当前 OpenRF1 固件提供查询和单轮点动，四轮速度指令需要下位机支持。
 
 ## OpenRF1 串口联通检查
 

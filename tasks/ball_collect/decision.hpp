@@ -17,6 +17,7 @@ struct PushMouth
 {
   double forward_m = 0.06;
   double width_m = 0.20;
+  double visual_standoff_m = 0.08;
 };
 
 struct Inputs
