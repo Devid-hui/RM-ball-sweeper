@@ -10,7 +10,6 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import onnxruntime as ort
 
 if __package__:
     from .ground_position import GroundProjector
@@ -26,6 +25,7 @@ class BallDetector:
     """每个推理线程拥有一个实例，依次处理 BGR8 图像。"""
 
     def __init__(self, asset_dir=ASSETS, *, threads=None, profile="full"):
+        import onnxruntime as ort
         config = json.loads((asset_dir / PROFILES[profile]).read_text())
         model = asset_dir / config.get("model", "ball_800.onnx")
         if hashlib.sha256(model.read_bytes()).hexdigest() != config["sha256"]:

@@ -83,9 +83,29 @@ class GroundProjector:
             return None
         # 球心位于离地一个半径的平面上，用框中心的射线估算球心。
         depth = (BALL_RADIUS_M - self.origin[2]) / ray[2]
-        forward, leftward = (self.origin + depth * ray)[:2]
+        return self.chassis_position(depth * ray)
+
+    def position_from_diameter(self, box, *, scale=1.0):
+        left, top, right, bottom = box
+        width, height = self.image_size
+        if not (0 < left < right < width and 0 < top < bottom < height):
+            return None
+        x, y = (left + right) / 2, (top + bottom) / 2
+        pixels = np.array([(x, y), (left, y), (right, y), (x, top), (x, bottom)], dtype=np.float64)
+        normalized = cv2.undistortPoints(pixels[:, None], self.matrix, self.distortion).reshape(-1, 2)
+        rays = np.column_stack((normalized, np.ones(5)))
+        rays /= np.linalg.norm(rays, axis=1)[:, None]
+        # 球两侧的单位视线形成弦长 2 sin(视角/2)，等于球径除以球心距离。
+        chord = (np.linalg.norm(rays[1] - rays[2]) + np.linalg.norm(rays[3] - rays[4])) / 2
+        if not isfinite(chord) or chord <= 0:
+            return None
+        distance = 2 * BALL_RADIUS_M * scale / chord
+        return self.chassis_position(self.rotation @ (rays[0] * distance))
+
+    def chassis_position(self, displacement):
+        forward, leftward = (self.origin + displacement)[:2]
         distance = hypot(forward, leftward)
-        if forward <= 0 or distance > self.max_distance_m:
+        if not isfinite(distance) or forward <= 0 or distance > self.max_distance_m:
             return None
         return {"x_m": float(forward), "y_m": float(leftward), "distance_m": distance}
 

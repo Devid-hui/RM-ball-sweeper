@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""检查 ROCK 4D 与 OpenRF1 UART2 测试固件的请求和回复。"""
+"""检查 ROCK 4D 与 OpenRF1 的串口和编码器，可在架空后单轮点动。"""
 # 来源：ROCK4D_OpenRF1_通信配置指南_20261122/04_ROCK配置与测试/serial_test.py
 import argparse
 import fcntl
@@ -9,6 +9,11 @@ import select
 import sys
 import termios
 import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tasks.ball_collect.openrf1 import counter_delta, encoder_counts
+
 
 def configure(fd):
     attrs = termios.tcgetattr(fd)
@@ -23,7 +28,7 @@ def configure(fd):
     termios.tcsetattr(fd, termios.TCSANOW, attrs)
     termios.tcflush(fd, termios.TCIOFLUSH)
 
-def exchange(fd, request, expected, timeout):
+def exchange(fd, request, timeout, expected=None):
     payload = (request + '\n').encode('ascii')
     deadline = time.monotonic() + timeout
     while payload:
@@ -36,7 +41,6 @@ def exchange(fd, request, expected, timeout):
         except BlockingIOError:
             continue
     buffer = b''
-    observed = []
     while time.monotonic() < deadline:
         if not select.select([fd], [], [], max(0, deadline-time.monotonic()))[0]:
             break
@@ -50,20 +54,51 @@ def exchange(fd, request, expected, timeout):
         if len(buffer) > 4096:
             raise RuntimeError('Unexpected continuous data on the selected port')
         while b'\n' in buffer:
-            line, buffer = buffer.split(b'\n', 1)
-            line = line.rstrip(b'\r')
-            if line == expected.encode('ascii'):
-                print(f'PASS {request!r} -> {expected!r}', flush=True)
-                return
-            observed.append(repr(line))
-            if len(observed) > 32:
-                raise RuntimeError('Too many unrelated response lines')
-    raise TimeoutError(f'{request!r}: expected {expected!r}; received {observed}, partial={buffer!r}')
+            raw, buffer = buffer.split(b'\n', 1)
+            reply = raw.rstrip(b'\r').decode('ascii')
+            if expected is None or reply == expected:
+                print(f'{request} -> {reply}', flush=True)
+                return reply
+    raise TimeoutError(f'{request!r} 回复超时，收到 {buffer!r}')
+
+
+def check_board(fd, timeout, jog):
+    def ask(command, expected=None):
+        return exchange(fd, command, timeout, expected)
+
+    ask('PING', 'PONG')
+    version = ask('VER')
+    if version == 'RX:VER':
+        if jog:
+            raise RuntimeError('回显固件仅支持通信检查')
+        ask('HELLO_123', 'RX:HELLO_123')
+        return
+    if version not in ('COLLECT1', 'ERR'):
+        raise RuntimeError(f'无法识别的固件回复 {version!r}')
+    before = encoder_counts(ask('ENC').split())
+    if not jog:
+        return
+    if version != 'ERR':
+        raise RuntimeError('JOG 需要四轮点动固件，当前为 COLLECT1')
+    wheels = 'ABCD' if jog == 'all' else jog
+    for wheel in wheels:
+        if ask('JOG ' + wheel) != 'DONE':
+            raise RuntimeError('点动未执行或该通道已用过，本次检查结束')
+        time.sleep(0.25)  # 等车轮惯性滑行后再比较原始计数。
+        after = encoder_counts(ask('ENC').split())
+        delta = [counter_delta(a, b) for a, b in zip(before, after)]
+        print('编码器增量', ' '.join(f'{ch}={d:+d}' for ch, d in zip('ABCD', delta)), flush=True)
+        active = [ch for ch, d in zip('ABCD', delta) if abs(d) >= 3]
+        if active != [wheel]:
+            raise RuntimeError(f'预期只有 {wheel} 有计数，请核对供电、轮位及编码器')
+        before = after
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', default='/dev/ttyS4')
     parser.add_argument('--timeout', type=float, default=3.0)
+    parser.add_argument('--jog', choices=['A', 'B', 'C', 'D', 'all'],
+                        help='底盘架空后使用，每个选中通道点动约 0.2 秒')
     args = parser.parse_args()
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error('--timeout must be positive')
@@ -78,11 +113,10 @@ def main():
         previous = termios.tcgetattr(fd)
         configure(fd)
         print(f'Testing {args.port}: 115200 8N1, no flow control', flush=True)
-        exchange(fd, 'PING', 'PONG', args.timeout)
-        exchange(fd, 'HELLO_123', 'RX:HELLO_123', args.timeout)
-        print('PASS: bidirectional UART communication verified', flush=True)
+        check_board(fd, args.timeout, args.jog)
+        print('PASS', flush=True)
         return 0
-    except (OSError, RuntimeError, termios.error) as error:
+    except (OSError, RuntimeError, ValueError, termios.error) as error:
         print(f'FAIL: {error}', file=sys.stderr)
         return 1
     finally:

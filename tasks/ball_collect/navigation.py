@@ -1,21 +1,28 @@
 """按墙标坐标管理巡线、对准、推送和退回。速度使用车体坐标。"""
 from math import atan2, cos, dist, hypot, pi, sin
+from time import monotonic
 
 from tasks.ball_detect.ground_position import BALL_RADIUS_M
 
 
 STOP = (0.0, 0.0, 0.0)
 MATCH_DISTANCE_M = 0.10
+POSITION_TOLERANCE_M = 0.035
+TURN_TOLERANCE_RAD = 0.05
 
 
 def angle_error(target, current):
     return (target - current + pi) % (2 * pi) - pi
 
 
+def turn_rate(error):
+    return max(-0.40, min(0.40, error))
+
+
 def drive_to(pose, point, heading, speed):
     x, y, yaw = pose
     dx, dy = point[0] - x, point[1] - y
-    turn = max(-0.40, min(0.40, angle_error(heading, yaw)))
+    turn = turn_rate(angle_error(heading, yaw))
     scale = min(1.0, speed / max(hypot(dx, dy), 1e-6))
     return (scale * (cos(yaw) * dx + sin(yaw) * dy),
             scale * (-sin(yaw) * dx + cos(yaw) * dy), turn)
@@ -35,45 +42,45 @@ def inside_zone(point, zone, margin=0.0):
 
 
 class Navigator:
-    def __init__(self, config):
+    def __init__(self, config, minimum_candidate_forward_m=0.0):
         self.config = config
         self.phase = "lane_start"
         self.lane = 0
         self.deliveries = 0
-        self.empty_lanes = 0
+        self.resume_point = None
         self.target = None
         self.visual_target = None  # 上一次观测到的球心，车体坐标（前、左）。
         xmin, ymin, xmax, ymax = config["drop_zone"]
         self.drop = ((xmin + xmax) / 2, (ymin + ymax) / 2)
         self.fork = config["fork_forward_m"]
+        self.minimum_forward = max(self.fork, minimum_candidate_forward_m)
         self.half_mouth = config["fork_width_m"] / 2 - BALL_RADIUS_M
         self.heading = pi
         self.release = None
         self.staging = False
+        self.turn_heading = None
+        self.turn_deadline = None
 
-    def next_lane(self):
-        self.lane = (self.lane + 1) % len(self.config["lane_starts"])
-        done = (self.deliveries >= self.config["max_deliveries"]
-                or self.empty_lanes >= len(self.config["lane_starts"]))
-        self.phase = "finished" if done else "lane_start"
-        self.target = None
-        self.visual_target = None
+    def lane_endpoints(self):
+        far_x, y = self.config["lane_starts"][self.lane]
+        near = (self.config["lane_end_x_m"], y)
+        far = (far_x, y)
+        return (far, near) if self.lane % 2 == 0 else (near, far)
 
     def approach_by_camera(self, pose, balls):
         if self.phase in ("visual_approach", "wait_for_tag") and (pose is None or not balls):
             self.target = None  # 墙标或球丢失，重新确认场地坐标。
+        if self.visual_target is None:
+            balls = [ball for ball in balls if ball[0] >= self.minimum_forward]
         if not balls:
             return STOP, "no visible ball"
 
         reference = self.visual_target or (0.0, 0.0)
         ball = min(balls, key=lambda point: dist(point, reference))
         if self.visual_target is not None and dist(ball, reference) > MATCH_DISTANCE_M:
-            # 先停车。已到前叉附近时，即使旁边又出现一个球也要等墙标。
-            if pose is not None:
-                self.visual_target = ball
-                self.target = None
-            elif self.phase not in ("wait_for_tag", "approach"):
-                self.visual_target = None
+            # 新目标从下一帧重新过近距筛选。无墙标时保留叉前已锁定的球。
+            if pose is not None or self.phase not in ("wait_for_tag", "approach"):
+                self.visual_target = self.target = None
             return STOP, "visual target lost"
         self.visual_target = ball
 
@@ -103,100 +110,129 @@ class Navigator:
         velocity = drive_to((0, 0, 0), (gap, ball[1]), 0, self.config["visual_approach_speed_m_s"])
         return velocity, "approach by camera"
 
-    def step(self, pose, balls):
+    def search(self, pose, balls):
+        start, end = self.lane_endpoints()
+        low, high = sorted((start[0], end[0]))
+        self.resume_point = (max(low, min(high, pose[0])), start[1])
+        candidates = self.field_candidates(pose, balls, self.minimum_forward)
+        match = self.match_target(candidates)
+        if match is not None:
+            self.target, self.visual_target = match, candidates[match]
+            self.phase, self.staging = "approach", True
+            return STOP, "target confirmed"
+        if candidates:
+            self.target = min(candidates, key=lambda point: dist(point, pose[:2]))
+            self.visual_target = candidates[self.target]
+            return STOP, "confirming target"
+        self.target = self.visual_target = None
+        if dist(pose[:2], end) > POSITION_TOLERANCE_M:
+            return drive_to(pose, end, pi, self.config["search_speed_m_s"]), "search lane"
+        self.lane += 1
+        self.resume_point = None
+        self.phase = "finished" if self.lane == len(self.config["lane_starts"]) else "lane_start"
+        return STOP, "lane searched"
+
+    def field_candidates(self, pose, balls, minimum_forward):
+        candidates = {}
+        for ball in balls:
+            point = field_point(pose, ball)
+            if ball[0] >= minimum_forward and not inside_zone(point, self.config["drop_zone"]):
+                candidates[point] = ball
+        return candidates
+
+    def match_target(self, candidates):
+        if self.target is None or not candidates:
+            return None
+        nearest = min(candidates, key=lambda point: dist(point, self.target))
+        return nearest if dist(nearest, self.target) <= MATCH_DISTANCE_M else None
+
+    def approach(self, pose, balls):
+        candidates = self.field_candidates(pose, balls, self.fork)
+        match = self.match_target(candidates)
+        if match is None:
+            return STOP, "target lost during approach"
+        self.target, self.visual_target = match, candidates[match]
+        heading = atan2(self.drop[1] - match[1], self.drop[0] - match[0])
+        forward, lateral = self.visual_target
+        if (forward <= self.fork + 0.05 and abs(lateral) <= self.half_mouth / 2
+                and abs(angle_error(heading, pose[2])) <= 0.10):
+            self.heading, self.phase = heading, "push"
+            return STOP, "fork aligned"
+        dx, dy = pose[0] - match[0], pose[1] - match[1]
+        ux, uy = cos(heading), sin(heading)
+        ahead, side = dx * ux + dy * uy, -dx * uy + dy * ux
+        behind, offset = self.fork + 0.02, 0.0
+        # 车身与球并排或越过球时，先侧移让出导杆，再到球后方。
+        if self.staging and ahead > -behind / 2:
+            clearance = self.config["track_m"] / 2 + self.half_mouth + 0.06
+            offset = clearance if side >= 0 else -clearance
+            behind = behind + 0.12 if abs(side) >= clearance - POSITION_TOLERANCE_M else -ahead
+        else:
+            self.staging = False
+        point = (match[0] - behind * ux - offset * uy, match[1] - behind * uy + offset * ux)
+        return drive_to(pose, point, heading, self.config["approach_speed_m_s"]), "approach ball"
+
+    def push(self, pose):
+        ux, uy = cos(self.heading), sin(self.heading)
+        offset = self.fork + 2 * BALL_RADIUS_M
+        stop = (self.drop[0] - offset * ux, self.drop[1] - offset * uy)
+        ball = field_point(pose, (offset, 0.0))
+        if dist(pose[:2], stop) <= 0.025 and inside_zone(ball, self.config["drop_zone"], BALL_RADIUS_M):
+            self.release = (pose[0] - self.config["reverse_m"] * ux, pose[1] - self.config["reverse_m"] * uy)
+            self.phase = "reverse"
+            return STOP, "drop-off reached"
+        return drive_to(pose, stop, self.heading, self.config["push_speed_m_s"]), "push ball"
+
+    def turn(self, yaw):
+        if monotonic() >= self.turn_deadline:
+            raise TimeoutError("未在限定时间内完成 90° 转向，停车")
+        if yaw is None:
+            return STOP, "turn feedback unavailable"
+        error = angle_error(self.turn_heading, yaw)
+        if abs(error) > TURN_TOLERANCE_RAD:
+            return (0.0, 0.0, turn_rate(error)), "quarter turn"
+        self.deliveries += 1
+        self.target = self.visual_target = None
+        self.phase = "finished" if self.deliveries >= self.config["max_deliveries"] else "return_to_lane"
+        self.turn_deadline = monotonic() + self.config["turn_timeout_s"]
+        return STOP, "quarter turn complete"
+
+    def step(self, pose, balls, *, wheel_yaw=None):
         if self.phase == "finished":
             return STOP, "finished"
+        if self.phase == "turn":
+            return self.turn(pose[2] if pose is not None else wheel_yaw)
+        if self.phase == "return_to_lane" and pose is None:
+            # 侧向转完可能看不到墙标。恢复墙标前，只允许原地转回。
+            if wheel_yaw is None or monotonic() >= self.turn_deadline:
+                return STOP, "waiting for wall tag"
+            error = angle_error(pi, wheel_yaw)
+            if abs(error) <= TURN_TOLERANCE_RAD:
+                return STOP, "waiting for wall tag"
+            return (0.0, 0.0, turn_rate(error)), "face wall tag"
         if self.phase in ("visual_approach", "wait_for_tag"):
             return self.approach_by_camera(pose, balls)
         if pose is None:
-            if self.phase in ("lane_start", "search", "approach"):
-                if self.phase == "search":
-                    self.target = None
-                return self.approach_by_camera(None, balls)
-            return STOP, "wall tag unavailable"
-
-        config = self.config
-        position = pose[:2]
-        lane_start = config["lane_starts"][self.lane]
-        valid = {field_point(pose, ball): ball for ball in balls if ball[0] >= self.fork}
-        outside = [point for point in valid if not inside_zone(point, config["drop_zone"])]
-        matches = [point for point in outside if self.target and dist(point, self.target) <= MATCH_DISTANCE_M]
-
-        if self.phase == "lane_start":
-            if dist(position, lane_start) <= 0.035 and abs(angle_error(pi, pose[2])) <= 0.12:
+            if self.phase not in ("lane_start", "search", "approach"):
+                return STOP, "wall tag unavailable"
+            if self.phase == "search":
+                self.target = None
+            return self.approach_by_camera(None, balls)
+        if self.phase in ("lane_start", "return_to_lane"):
+            point = self.resume_point or self.lane_endpoints()[0]
+            if dist(pose[:2], point) <= POSITION_TOLERANCE_M and abs(angle_error(pi, pose[2])) <= 0.12:
                 self.phase = "search"
                 return STOP, "lane start reached"
-            return drive_to(pose, lane_start, pi, config["search_speed_m_s"]), "return to lane"
-
+            return drive_to(pose, point, pi, self.config["search_speed_m_s"]), "return to lane"
         if self.phase == "search":
-            if matches:
-                self.target = min(matches, key=lambda point: dist(point, self.target))
-                self.visual_target = valid[self.target]
-                self.phase = "approach"
-                self.staging = True
-                return STOP, "target confirmed"
-            if outside:
-                self.target = min(outside, key=lambda point: dist(point, position))
-                self.visual_target = valid[self.target]
-                return STOP, "confirming target"
-            self.target = None
-            self.visual_target = None
-            end = (config["lane_end_x_m"], lane_start[1])
-            if dist(position, end) <= 0.035:
-                self.empty_lanes += 1
-                self.next_lane()
-                return STOP, "lane searched"
-            return drive_to(pose, end, pi, config["search_speed_m_s"]), "search lane"
-
+            return self.search(pose, balls)
         if self.phase == "approach":
-            if not matches:
-                return STOP, "target lost during approach"
-            self.target = min(matches, key=lambda point: dist(point, self.target))
-            self.visual_target = valid[self.target]
-            dx, dy = self.drop[0] - self.target[0], self.drop[1] - self.target[1]
-            heading = atan2(dy, dx)
-            along = cos(heading), sin(heading)
-            ball_dx, ball_dy = self.target[0] - position[0], self.target[1] - position[1]
-            forward, lateral = self.visual_target
-            if (self.fork <= forward <= self.fork + 0.05 and abs(lateral) <= self.half_mouth / 2
-                    and abs(angle_error(heading, pose[2])) <= 0.10):
-                self.heading = heading
-                self.phase = "push"
-                return STOP, "fork aligned"
-            behind = self.fork + 0.02
-            point = self.target[0] - behind * along[0], self.target[1] - behind * along[1]
-            # If the chassis is beside or ahead of the ball, clear it sideways before lining up.
-            ahead = -ball_dx * along[0] - ball_dy * along[1]
-            side = ball_dx * along[1] - ball_dy * along[0]
-            if self.staging and ahead > -behind / 2:
-                normal = -along[1], along[0]
-                clearance = config["track_m"] / 2 + self.half_mouth + 0.06
-                offset = clearance if side >= 0 else -clearance
-                distance_back = behind + 0.12 if abs(side) >= clearance - 0.035 else -ahead
-                point = (self.target[0] - distance_back * along[0] + offset * normal[0],
-                         self.target[1] - distance_back * along[1] + offset * normal[1])
-            else:
-                self.staging = False
-            return drive_to(pose, point, heading, config["approach_speed_m_s"]), "approach ball"
-
+            return self.approach(pose, balls)
         if self.phase == "push":
-            along = cos(self.heading), sin(self.heading)
-            # The fork carries the ball slightly ahead of its front edge.
-            offset = self.fork + 2 * BALL_RADIUS_M
-            stop = self.drop[0] - offset * along[0], self.drop[1] - offset * along[1]
-            front_ball = field_point(pose, (offset, 0.0))
-            if dist(position, stop) <= 0.025 and inside_zone(
-                front_ball, config["drop_zone"], BALL_RADIUS_M,
-            ):
-                self.release = (position[0] - config["reverse_m"] * along[0],
-                                position[1] - config["reverse_m"] * along[1])
-                self.phase = "reverse"
-                return STOP, "drop-off reached"
-            return drive_to(pose, stop, self.heading, config["push_speed_m_s"]), "push ball"
-
-        if dist(position, self.release) <= 0.035:
-            self.deliveries += 1
-            self.empty_lanes = 0
-            self.next_lane()
-            return STOP, "fork cleared"
-        return drive_to(pose, self.release, self.heading, config["push_speed_m_s"]), "reverse clear"
+            return self.push(pose)
+        if dist(pose[:2], self.release) > POSITION_TOLERANCE_M:
+            return drive_to(pose, self.release, self.heading, self.config["push_speed_m_s"]), "reverse clear"
+        self.turn_heading = pose[2] + self.config["turn_direction"] * pi / 2
+        self.turn_deadline = monotonic() + self.config["turn_timeout_s"]
+        self.phase = "turn"
+        return STOP, "fork cleared"

@@ -10,5 +10,5 @@ parity: none
 stop_bits: 1
 flow_control: none
 
-# 已验证基本串口往返。速度指令、轮端反馈和断联停车协议待定义。
-protocol: openrf1_uart2_echo
+# 实车 --drive 所需的固件协议。板上实际版本由 VER 查询。
+protocol: COLLECT1

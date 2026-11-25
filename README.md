@@ -17,18 +17,53 @@ tools/calibrate_ball_camera.py   用棋盘格照片求相机内参
 tools/                        日志、退出、队列工具和 AprilTag 位姿解算
 ```
 
-实车采球入口是 `tasks/ball_collect/run.py`。图像回放、相机预演和实车共用同一个导航决策。看见球但没有墙标时，按球在车体前方、左方的位置低速平移，保持车头朝向。默认平移上限为 0.05 m/s，球心距前叉前缘约 8–9 cm 时停车等墙标。两个参数在 `configs/collector.json` 中，分别是 `visual_approach_speed_m_s` 和 `visual_standoff_m`，停车判定含 1 cm 容差。
-墙标连续两帧确认同一球在场地中的位置后，小车才对准投放区。无墙标时丢球、推送或退回途中丢标都会停车。
+## 采球流程
 
-下方 C++ 决策演示使用模拟输入。搜索时选前方可接近的小球，车头对准球与收球区的推送方向后请求开始推球。
-推球口在车体原点前方约 0.06 m，宽约 0.20 m。球心与前叉中线的横向偏差需落在扣除球半径后的宽度内。
-推送任务由导航提供，球进入前叉后即使离开画面也可继续推送。
-靠墙时墙标过期则停车，恢复观测后可继续。到达墙边停车点时输出零速度。
-S 形路线、把墙标位姿换算成停车点以及停车后的后退和 90° 转向，待接入导航和底盘反馈。
+图像回放、相机预演和实车使用同一个 Python 入口。小车保持前摄朝墙标，用麦克纳姆轮沿相邻路段交替前进、倒退，横移换道。发现球后记住离开巡线的位置。连续两帧用墙标确认同一球后，小车移到球后方，对准前叉并低速推送。无墙标时只能低速接近可见球，球心距前叉前缘约 8–9 cm 时停车等墙标。
 
-急停或视觉与底盘反馈过期时，输出零速度并撤销运动许可。上层确认故障解除并收到人工授权后再恢复运动。
-速度约定前进、左移、逆时针为正，单位为 `m/s`、`m/s`、`rad/s`。
-ROCK 4D 到 OpenRF1 的串口参数见 `configs/chassis_link.yaml`。
+球入叉后可以离开画面。推送和后退途中丢失墙标都停车。按墙标定位到投放区后，小车先停、后退，再从实测车头方向原地转 90°。转动时墙标可能离开前摄视野，实车用四轮编码器补测航向。随后转回朝墙方向，重新看到墙标才平移到刚才中断的路段。日志中的 `releases` 统计完成的投放流程，实际留在区内的球数需要现场清点。
+
+在项目根目录构建运动学绑定并回放。两种视觉方案都需要 NumPy 和带 `aruco.ArucoDetector` 的 OpenCV。构建绑定需要 CMake、C++17、pybind11 和当前 Python 的开发头文件。Ubuntu 已装系统 OpenCV 时，可以用 `python3 -m venv --system-site-packages build-collector/venv` 建立环境，再运行 `. build-collector/venv/bin/activate`。使用 `onnx-ground` 时还需安装 `onnxruntime`。
+
+```bash
+cmake -S . -B build-collector -DBALL_BUILD_CAPTURE=OFF -DBALL_BUILD_RUNTIME=ON \
+  -DPython3_EXECUTABLE="$(command -v python3)"
+cmake --build build-collector -j2
+PYTHONPATH=build-collector python3 -m tasks.ball_collect.run --images test/picture/*.jpg
+PYTHONPATH=build-collector python3 -m tasks.ball_collect.run --images test/picture/*.jpg --vision onnx-ground
+PYTHONPATH=build-collector python3 -m unittest discover -s test -p 'test_*.py'
+```
+
+默认按提案中的方案 A 运行 `hsv-diameter`，用 HSV 颜色提取圆形轮廓，根据 17 mm 球径及其成像视角测距。`--vision onnx-ground` 使用仓库中的 ONNX 模型识球，并把球心像素投影到距地 8.5 mm 的平面。需长期使用该方案时，将配置文件的 `vision` 设为 `onnx-ground`。图像回放输出 JSON 行。
+
+在 ROCK 4D 上用下文的海康相机依赖构建两个绑定。先做相机预演，核对输出中的 `balls_m`、`tag_pose` 和 `wheels`。完成下表中的实测、控制板使用 `COLLECT1` 且安装 pyserial 后，同一命令加 `--drive --port /dev/ttyS4 --config 实测配置.json` 即可驱动车轮。车体速度以前进、左移、逆时针为正。
+
+```bash
+cmake -S . -B build-hik -DBALL_BUILD_CAPTURE=OFF -DBALL_BUILD_RUNTIME=ON \
+  -DBALL_WITH_HIKROBOT=ON -DBALL_BUILD_YOLO_CAMERA=ON -DPython3_EXECUTABLE="$(command -v python3)"
+cmake --build build-hik -j2
+PYTHONPATH=build-hik python3 -m tasks.ball_collect.run --serial DA6415777 --frames 60
+```
+
+## 实车参数和验收
+
+任务参数集中在 `configs/collector.json`。可复制为场地专用 JSON，再用 `--config` 指定。相机参数在 `configs/hikrobot_DA6415777.yaml`，可用 `--calibration` 切换。
+
+| 配置项 | 起始值 | 实测方法与影响 |
+| --- | --- | --- |
+| `encoder_counts_per_rev`、`drive_sign_abcd`、`drive_calibrated` | 1320、[1,1,1,1]、false | 前两项是示例。架空后手转**输出轮**一整圈，取编码器计数差的绝对值，跨 65535 时按 16 位回绕。分别点动 A/B/C/D，观察轮位，正命令往车头滚填 1，反向填 −1。四轮核实后在同一配置中填写两项实测值并将标志设为 true。它们同时影响闭环车速和转角。 |
+| `wheel_radius_m`、`wheelbase_m`、`track_m` | 0.05、0.30、0.20 m | 测有效轮半径、前后轮中心距和左右轮中心距，填完整距离。用直线和地面直角线检查位移、转向比例。 |
+| `fork_forward_m`、`fork_width_m`、相机 YAML 的 `minimum_candidate_forward_m` | 0.06、0.20、0.06 m | 测车体中心到叉前缘、两杆内宽。在叉内和前方各摆一颗球。新目标的前向门限取前伸和近距门限的较大值，已锁定的球可继续靠近。 |
+| `visual_approach_speed_m_s`、`visual_standoff_m`、`push_speed_m_s` | 0.05 m/s、0.08 m、0.05 m/s | 临时遮住墙标，测叉前停车间隙。用单球验证推送速度是否会让球滚出。搜索、对准速度另由 `search_speed_m_s`、`approach_speed_m_s` 控制。单轮上限 `max_wheel_rad_s` 默认为 6 rad/s。 |
+| `tag_id`、`tag_size_m`、`drop_zone` | 0、0.10 m、[0.12,−0.15,0.34,0.15] m | 量标签黑框外边长和区域四界 [xmin,ymin,xmax,ymax]。X 从墙面指向场内，Y 朝标签图案右侧。用尺核对停车处的球心和前叉与墙面的余量。 |
+| `lane_starts`、`lane_end_x_m` | 两条路段远端 X 为 1.10 m，Y 为 ±0.25 m，近端 X 为 0.40 m | 按实地净空和相机有效视宽调整。第二条从近端往远端扫。换道前核对相邻两路能覆盖两路之间的球，倒退路段需保持净空。 |
+| `reverse_m`、`turn_direction`、`turn_timeout_s` | 0.20 m、1、10 s | 先量后退至前叉离开球堆所需距离，再对地面直角线量实际转角。1 为左转，−1 为右转。软件进入目标角 0.05 rad（约 2.9°）内时停车。若超时，先查轮序、计数和打滑。 |
+| 相机 YAML 的 `camera_matrix`、`distortion_coefficients`、`camera_to_chassis` | 1440×1080，光心高 0.10 m，安装角均为 0° | 核对工作画幅，量相机相对车体中心的位置和俯角。在前方 0.25、0.50、1.00 m 和左右偏移处摆球，逐点比较输出的前向、左向坐标。 |
+| `hsv_lower`、`hsv_upper`、`diameter_scale` | [18,45,35]、[46,255,255]、1.0 | 方案 A 的黄绿色起始范围。用现场光照下的球和空地调颜色，避免只提取到球的一小块。用相机光心到球心的实测距离与估计距离之比修正比例，再换距离复测。 |
+
+板上 A/B/C/D 依次对应后左、前右、前左、后右，向车头滚动时编码器原始增量依次为 −、+、−、+。先手转核对这张映射，再用点动确认驱动通道与同轮编码器成对。若轮位不符，先对照接线。`drive_sign_abcd` 只改变对应通道的驱动极性。
+
+上地前在架空状态检查四轮同向前进、左移和逆时针旋转的轮序。对 `COLLECT1` 验证运行中断开指令后控制输出在 500 ms 超时后的下一个 20 ms 控制周期内归零，并观察实际滑行。地面验收连续做两轮完整推送，遮挡一次墙标验证停车与恢复，记录布球数、实际入区数、漏收位置、重复锁定次数及实测转角。
 
 ## 运行决策演示
 
@@ -52,24 +87,23 @@ cmake --build build-collector -j2
 ctest --test-dir build-collector --output-on-failure
 ```
 
-指定上限时，超限会按同一个比例缩放四轮，保留前进、横移和转向的比例。实车尺寸请使用实测值。这两个入口只打印解算结果。当前 OpenRF1 固件提供查询和单轮点动，四轮速度指令需要下位机支持。
+指定上限时，超限会按同一个比例缩放四轮，保留前进、横移和转向的比例。上述 C++ 演示只打印解算结果。Python 实车入口把四轮指令发给采球固件。
 
 ## OpenRF1 串口联通检查
 
-当前实板使用[四路编码器与单轮点动固件](firmware/openrf1/README.md)，用 `PING` 检查连接，用 `ENC` 读取计数。下面的脚本适用于早期 UART2 回显固件。
+检查工具自动区分早期回显、四轮点动和采球固件。点动固件支持单轮固定脉冲，采球固件通过 USART2 接收四轮闭环指令。固件版本和轮序见 [OpenRF1 说明](firmware/openrf1/README.md)。
 
 通信指南已验证 ROCK 4D 的 UART4-M1（`/dev/ttyS4`）到 OpenRF1 USART2 的基本双向通信。
 应用串口为 115200、8N1、无流控。两板使用 3.3 V TTL，ROCK 物理 11（TX）接 RX2，
 物理 15（RX）接 TX2，物理 9（GND）接 GND。两板分别供电。
 
-在 ROCK 4D 上关闭占用串口的其他程序，再从项目根目录运行。
+在 ROCK 4D 上关闭占用串口的其他程序，再从项目根目录运行。接线记录在 `configs/chassis_link.yaml`。设备名不同时，给检查工具和采球入口分别传 `--port`。
 
 ```bash
 python3 tools/check_openrf1_uart.py
 ```
 
-检查程序向测试固件发送 `PING\n` 与 `HELLO_123\n`，预期分别收到 `PONG` 和 `RX:HELLO_123`。
-这一步验证串口收发。速度指令、轮速与编码器反馈、故障状态和失联停车需要在电机控制固件中实现。
+默认只查询。电机固件会返回 A/B/C/D 四个原始计数，`VER` 返回 `COLLECT1` 表示采球固件。使用点动固件且车已架空时，运行 `python3 tools/check_openrf1_uart.py --jog A` 可点动一个通道。`--jog all` 逐个执行并打印四路计数差，出现错误即停止后续通道。每个通道每次上电或复位只接受一次点动。
 
 ## 采球车图像采集
 
