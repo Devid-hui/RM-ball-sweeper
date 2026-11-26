@@ -36,7 +36,7 @@ PYTHONPATH=build-collector python3 -m unittest discover -s test -p 'test_*.py'
 
 默认按提案中的方案 A 运行 `hsv-diameter`，用 HSV 颜色提取圆形轮廓，根据 17 mm 球径及其成像视角测距。`--vision onnx-ground` 使用仓库中的 ONNX 模型识球，并把球心像素投影到距地 8.5 mm 的平面。需长期使用该方案时，将配置文件的 `vision` 设为 `onnx-ground`。图像回放输出 JSON 行。
 
-在 ROCK 4D 上用下文的海康相机依赖构建两个绑定。先做相机预演，核对输出中的 `balls_m`、`tag_pose` 和 `wheels`。完成下表中的实测、控制板使用 `COLLECT1` 且安装 pyserial 后，同一命令加 `--drive --port /dev/ttyS4 --config 实测配置.json` 即可驱动车轮。车体速度以前进、左移、逆时针为正。
+在 ROCK 4D 上用下文的海康相机依赖构建两个绑定。先做相机预演，核对输出中的 `balls_m`、`tag_pose` 和 `wheels`。实车运行前，完成下表中的标定并按实测轮位核对发送与反馈映射。控制板使用 `COLLECT1` 且安装 pyserial 后，同一命令加 `--drive --port /dev/ttyS4 --config 实测配置.json` 即可驱动车轮。车体速度以前进、左移、逆时针为正。
 
 ```bash
 cmake -S . -B build-hik -DBALL_BUILD_CAPTURE=OFF -DBALL_BUILD_RUNTIME=ON \
@@ -61,7 +61,9 @@ PYTHONPATH=build-hik python3 -m tasks.ball_collect.run --serial DA6415777 --fram
 | 相机 YAML 的 `camera_matrix`、`distortion_coefficients`、`camera_to_chassis` | 1440×1080，光心高 0.10 m，安装角均为 0° | 核对工作画幅，量相机相对车体中心的位置和俯角。在前方 0.25、0.50、1.00 m 和左右偏移处摆球，逐点比较输出的前向、左向坐标。 |
 | `hsv_lower`、`hsv_upper`、`diameter_scale` | [18,45,35]、[46,255,255]、1.0 | 方案 A 的黄绿色起始范围。用现场光照下的球和空地调颜色，避免只提取到球的一小块。用相机光心到球心的实测距离与估计距离之比修正比例，再换距离复测。 |
 
-板上 A/B/C/D 依次对应后左、前右、前左、后右，向车头滚动时编码器原始增量依次为 −、+、−、+。先手转核对这张映射，再用点动确认驱动通道与同轮编码器成对。若轮位不符，先对照接线。`drive_sign_abcd` 只改变对应通道的驱动极性。
+**2026-11-26 架空单轮实测**。OpenRF1 的 `$Car` 参数按 A/B/C/D 排列，本次对应 **前左、前右、后左、后右**。ROCK 4D 经 CH340 接 OpenRF1 的 MV 口，依次单轮转动约 3 秒，每轮转动和归零指令均收到 `cmdOk`。见 [单轮实测记录](firmware/openrf1/README.md#2026-11-26-架空单轮实测)。
+
+采球程序的 [轮速发送与航向计算](tasks/ball_collect/openrf1.py) 使用 2026-11-25 的轮序。启用 `--drive` 前，逐轮核对编码器通道、向前滚动时的计数符号和正指令转向，再把发送和反馈映射与当前接线对齐。`drive_sign_abcd` 只改变对应通道的驱动极性。
 
 上地前在架空状态检查四轮同向前进、左移和逆时针旋转的轮序。对 `COLLECT1` 验证运行中断开指令后控制输出在 500 ms 超时后的下一个 20 ms 控制周期内归零，并观察实际滑行。地面验收连续做两轮完整推送，遮挡一次墙标验证停车与恢复，记录布球数、实际入区数、漏收位置、重复锁定次数及实测转角。
 
