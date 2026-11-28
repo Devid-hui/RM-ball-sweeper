@@ -10,5 +10,13 @@ parity: none
 stop_bits: 1
 flow_control: none
 
-# 实车 --drive 所需的固件协议。板上实际版本由 VER 查询。
+# 此项描述现有 --drive 的协议。厂商固件使用以下独立的已验证路径。
 protocol: COLLECT1
+factory_link:
+  adapter: ch340
+  protocol: car
+  acknowledgment: cmdOk
+  firmware: "C26 V2.2"
+  firmware_image: "Output/template.hex"
+  firmware_sha256: "7abad3e02db70be2f41b6211350702bac989e5a11fc9099cdfbd130aa3200ff9"
+  firmware_identity: user_confirmed_extracted_image

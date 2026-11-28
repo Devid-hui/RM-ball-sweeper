@@ -1,6 +1,39 @@
 """OpenRF1 四轮速度指令。串口上的轮序是 A、B、C、D。"""
 from binascii import crc_hqx
-from math import remainder, tau
+from math import isfinite, remainder, tau
+
+
+WHEEL_ORDER = ("fl", "fr", "rl", "rr")
+LEGACY_CHANNEL_ORDER = ("rl", "fr", "fl", "rr")
+# 必须与 COLLECT1 中的 encoder_sign 一致。
+ENCODER_SIGN_ABCD = (-1, 1, -1, 1)
+FACTORY_STOP = b"$Car:0,0,0,0!"
+C26_SAMPLE_PERIOD_S = 0.020
+
+
+def factory_car_command(wheels_rad_s, wheel_radius_m, channel_order=WHEEL_ORDER):
+    """把运动学输出的四轮角速度换成厂商协议的轮端线速度。"""
+    values = []
+    for wheel in channel_order:
+        speed = wheels_rad_s[WHEEL_ORDER.index(wheel)] * wheel_radius_m
+        if not isfinite(speed):
+            raise ValueError("厂商轮速指令要求有限数值")
+        text = f"{speed:.4f}".rstrip("0").rstrip(".")
+        values.append("0" if text == "-0" else text)
+    return "$Car:" + ",".join(values) + "!"
+
+
+def check_factory_car_link(device, timeout=0.15):
+    link = open_serial(device, timeout)
+    try:
+        link.reset_input_buffer()
+        link.write(FACTORY_STOP)
+        # 实板的 cmdOk 没有换行，读满 5 字节即可结束。
+        reply = link.read_until(size=5)
+        if reply != b"cmdOk":
+            raise RuntimeError(f"厂商零速指令期望 cmdOk，实际收到 {reply!r}")
+    finally:
+        link.close()
 
 
 def checked_line(command):
@@ -24,13 +57,47 @@ def counter_delta(before, after):
     return (after - before + 32768) % 65536 - 32768
 
 
+def read_c26_encoders(link):
+    """读取 C26 V2.2 补丁的采样号和四路原始累计计数。"""
+    link.write(b"$ENC!")
+    reply = link.read_until(size=80)
+    if not reply.endswith(b"\n"):
+        raise TimeoutError(f"C26 $ENC! 回复超时，收到 {reply!r}，请检查是否已烧录反馈补丁")
+    parts = reply.split()
+    fields = parts[1:]
+    if parts[:1] != [b"ENC"] or len(fields) != 5 or any(
+        not field.isdigit() or len(field) > 10 or int(field) >= 2**32 for field in fields
+    ):
+        raise ValueError(f"C26 编码器回复无效 {reply!r}")
+    sample, *counts = map(int, fields)
+    return sample, counts
+
+
+def c26_wheel_rpm(before, after, counts_per_rev):
+    """按 MCU 采样时间换算有符号轮端转速，保留编码器原始方向。"""
+    old_sample, old_counts = before
+    new_sample, new_counts = after
+    samples = (new_sample - old_sample) % 2**32
+    if samples == 0:
+        if old_counts != new_counts:
+            raise ValueError("C26 同一采样号的编码器计数不一致")
+        return None
+    # 诊断每秒至少查一次。允许 5 秒抖动，拒绝重启或过长的采样间隔。
+    if samples * C26_SAMPLE_PERIOD_S > 5:
+        raise ValueError("C26 采样号跳变，请检查控制板是否重启并重新查询")
+    scale = 60 / (counts_per_rev * samples * C26_SAMPLE_PERIOD_S)
+    deltas = [(b - a + 2**31) % 2**32 - 2**31 for a, b in zip(old_counts, new_counts)]
+    return [delta * scale for delta in deltas]
+
+
 class WheelHeading:
     """墙标给出绝对航向，编码器补上标签转出视野后的转角。"""
 
-    def __init__(self, model, counts_per_rev, max_wheel_rad_s):
+    def __init__(self, model, counts_per_rev, max_wheel_rad_s, channel_order=LEGACY_CHANNEL_ORDER):
         self.model = model
         self.radians_per_count = tau / counts_per_rev
         self.max_counts_s = max_wheel_rad_s / self.radians_per_count
+        self.wheel_indices = tuple(WHEEL_ORDER.index(wheel) for wheel in channel_order)
         self.previous = None
         self.sampled_at = None
         self.yaw = None
@@ -44,8 +111,9 @@ class WheelHeading:
             if elapsed < 0 or limit >= 32768 or max(map(abs, delta)) > limit:
                 raise ValueError("编码器计数跳变或采样间隔过长，停车")
             if tag_yaw is None and self.yaw is not None:
-                a, b, c, d = delta
-                angles = [value * self.radians_per_count for value in (-c, b, -a, d)]
+                angles = [0.0] * 4
+                for index, value, sign in zip(self.wheel_indices, delta, ENCODER_SIGN_ABCD):
+                    angles[index] = value * sign * self.radians_per_count
                 self.yaw = remainder(self.yaw + self.model.forward(angles)[2], tau)
         if tag_yaw is not None:
             self.yaw = tag_yaw
@@ -53,16 +121,27 @@ class WheelHeading:
         return self.yaw
 
 
+def open_serial(device, timeout=0.15):
+    if device == "ch340":
+        from tasks.ball_collect.ch340 import Ch340Serial
+
+        return Ch340Serial(timeout)
+    import serial
+
+    return serial.Serial(device, 115200, timeout=timeout, write_timeout=0.15, exclusive=True)
+
+
 class OpenRF1:
-    def __init__(self, device, counts_per_rev, drive_sign_abcd):
-        import serial
+    def __init__(self, device, counts_per_rev, drive_sign_abcd, channel_order=LEGACY_CHANNEL_ORDER):
         self.counts_per_rev = counts_per_rev
-        self.serial = serial.Serial(device, 115200, timeout=0.15, write_timeout=0.15, exclusive=True)
+        self.wheel_indices = tuple(WHEEL_ORDER.index(wheel) for wheel in channel_order)
+        self.serial = open_serial(device)
         self.sequence = 0
         try:
             self.serial.reset_input_buffer()
-            if self.exchange(b"VER\n") != ["COLLECT1"]:
-                raise RuntimeError("OpenRF1 需要采球固件 COLLECT1")
+            version = self.exchange(b"VER\n")
+            if version != ["COLLECT1"]:
+                raise RuntimeError(f"OpenRF1 需要采球固件 COLLECT1，收到 {version}")
             command = "D " + " ".join(map(str, drive_sign_abcd))
             if self.exchange(checked_line(command)) != ["OK"]:
                 raise RuntimeError("OpenRF1 拒绝轮向配置")
@@ -74,7 +153,8 @@ class OpenRF1:
         self.serial.write(payload)
         line = self.serial.read_until(size=80)
         if not line.endswith(b"\n"):
-            raise TimeoutError("OpenRF1 回复超时")
+            command = payload.split()[0].decode("ascii")
+            raise TimeoutError(f"OpenRF1 {command} 回复超时")
         return line.decode("ascii").split()
 
     def read_counts(self):
@@ -82,9 +162,8 @@ class OpenRF1:
 
     def send(self, wheels):
         # 单位为每 20 ms 的千分之一编码器计数，计数以向前滚动为正。
-        fl, fr, rl, rr = wheels
         scale = self.counts_per_rev * 20 / tau
-        targets = [round(speed * scale) for speed in (rl, fr, fl, rr)]
+        targets = [round(wheels[index] * scale) for index in self.wheel_indices]
         self.sequence = (self.sequence + 1) % 65536
         command = f"W {self.sequence} " + " ".join(map(str, targets))
         reply = self.exchange(checked_line(command))

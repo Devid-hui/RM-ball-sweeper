@@ -69,6 +69,42 @@ class CollectionRouteTest(unittest.TestCase):
         self.assertEqual(self.nav.step(None, [])[0], STOP)
         self.assertGreater(self.nav.step(pose, ball)[0][0], 0.0)
 
+    def test_persistent_loss_resumes_interrupted_lane_after_three_stops(self):
+        pose = (0.90, 0.0, math.pi)
+        ball = [(0.25, 0.0)]
+        for _ in range(2):
+            self.nav.step(pose, ball)
+        for _ in range(2):
+            self.assertEqual(self.nav.step(pose, [])[0], STOP)
+            self.assertEqual(self.nav.phase, "approach")
+        self.assertGreater(self.nav.step(pose, ball)[0][0], 0.0)
+        for _ in range(2):
+            self.assertEqual(self.nav.step(pose, [])[0], STOP)
+            self.assertEqual(self.nav.phase, "approach")
+        self.assertEqual(self.nav.step(pose, [])[0], STOP)
+        self.assertEqual(self.nav.phase, "lane_start")
+        self.nav.step(pose, [])
+        self.assertEqual(self.nav.phase, "search")
+        self.assertEqual(self.nav.deliveries, 0)
+
+    def test_loss_in_fork_blind_spot_keeps_car_stopped(self):
+        pose = (0.90, 0.0, math.pi)
+        for _ in range(2):
+            self.nav.step(pose, [(0.25, 0.0)])
+        closer = (0.76, 0.0, math.pi)
+        for _ in range(4):
+            self.assertEqual(self.nav.step(closer, [])[0], STOP)
+        self.assertEqual(self.nav.phase, "approach")
+
+    def test_aligns_at_fourteen_centimeters_before_ball_leaves_view(self):
+        pose = (0.90, 0.0, math.pi)
+        ball = [(0.14, 0.0)]
+        for _ in range(2):
+            self.nav.step(pose, ball)
+        self.assertEqual(self.nav.phase, "approach")
+        self.assertEqual(self.nav.step(pose, ball), (STOP, "fork aligned"))
+        self.assertEqual(self.nav.phase, "push")
+
     def test_new_target_uses_calibrated_near_cutoff_but_locked_ball_can_approach(self):
         nav = Navigator(self.config, minimum_candidate_forward_m=0.20)
         nav.step((1.1, 0.0, math.pi), [])

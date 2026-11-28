@@ -3,6 +3,7 @@
 # 来源：ROCK4D_OpenRF1_通信配置指南_20261122/04_ROCK配置与测试/serial_test.py
 import argparse
 import fcntl
+import json
 import math
 import os
 import select
@@ -12,7 +13,9 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tasks.ball_collect.openrf1 import counter_delta, encoder_counts
+from tasks.ball_collect.openrf1 import (
+    c26_wheel_rpm, check_factory_car_link, counter_delta, encoder_counts, open_serial, read_c26_encoders,
+)
 
 
 def configure(fd):
@@ -93,15 +96,56 @@ def check_board(fd, timeout, jog):
             raise RuntimeError(f'预期只有 {wheel} 有计数，请核对供电、轮位及编码器')
         before = after
 
+
+def check_c26_encoders(port, timeout, samples, counts_per_rev):
+    link = open_serial(port, timeout)
+    try:
+        link.reset_input_buffer()
+        previous = None
+        for index in range(samples):
+            if index:
+                time.sleep(0.1)
+            current = read_c26_encoders(link)
+            rpm = None if previous is None else c26_wheel_rpm(previous, current, counts_per_rev)
+            print(json.dumps(dict(sample=current[0], counts_abcd=current[1], rpm_abcd=rpm)), flush=True)
+            previous = current
+    finally:
+        link.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', default='/dev/ttyS4')
     parser.add_argument('--timeout', type=float, default=3.0)
-    parser.add_argument('--jog', choices=['A', 'B', 'C', 'D', 'all'],
-                        help='底盘架空后使用，每个选中通道点动约 0.2 秒')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--jog', choices=['A', 'B', 'C', 'D', 'all'],
+                      help='底盘架空后使用，每个选中通道点动约 0.2 秒')
+    mode.add_argument('--factory-car', action='store_true',
+                      help='只发送厂商全零轮速指令并检查 cmdOk')
+    mode.add_argument('--c26-encoders', type=int, nargs='?', const=10, metavar='SAMPLES',
+                      help='只发送 $ENC! 查询 C26 反馈补丁，默认查询 10 次')
+    parser.add_argument('--counts-per-rev', type=int, default=4680,
+                        help='C26 编码器模式的轮端每圈计数（默认 4680）')
     args = parser.parse_args()
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error('--timeout must be positive')
+    if args.c26_encoders is not None:
+        if args.c26_encoders < 2 or args.counts_per_rev <= 0:
+            parser.error('C26 查询次数至少为 2，每圈计数必须为正整数')
+        try:
+            check_c26_encoders(args.port, args.timeout, args.c26_encoders, args.counts_per_rev)
+        except (OSError, RuntimeError, ValueError, ImportError) as error:
+            print(f'FAIL: {error}', file=sys.stderr)
+            return 1
+        return 0
+    if args.factory_car:
+        try:
+            check_factory_car_link(args.port, args.timeout)
+        except (OSError, RuntimeError, ImportError) as error:
+            print(f'FAIL: {error}', file=sys.stderr)
+            return 1
+        print('PASS: $Car:0,0,0,0! -> cmdOk', flush=True)
+        return 0
     fd = None
     previous = None
     exclusive = False

@@ -3,7 +3,7 @@ import math
 import unittest
 from pathlib import Path
 
-from tasks.ball_collect.navigation import Navigator, STOP
+from tasks.ball_collect.navigation import BallFollower, Navigator, STOP
 
 
 class VisualApproachTest(unittest.TestCase):
@@ -12,6 +12,18 @@ class VisualApproachTest(unittest.TestCase):
         self.config = json.loads(path.read_text())
         self.nav = Navigator(self.config)
         self.pose = (0.75, 0.0, math.pi)
+
+    def test_follow_ball_keeps_target_and_stops_at_standoff(self):
+        follow = BallFollower(self.config, minimum_candidate_forward_m=0.16)
+        self.assertEqual(follow.step([(0.10, 0.0)])[0], STOP)
+        self.assertEqual(follow.step([(0.23, 0.08)])[0], STOP)
+        velocity, _ = follow.step([(0.21, 0.07), (0.17, -0.10)])
+        self.assertGreater(velocity[0], 0)
+        self.assertGreater(velocity[1], 0)
+        self.assertAlmostEqual(math.hypot(*velocity[:2]), self.config["visual_approach_speed_m_s"])
+        self.assertEqual(follow.step([(0.14, 0.07)]), (STOP, "ball at standoff"))
+        self.assertEqual(follow.step([])[0], STOP)
+        self.assertEqual(follow.step([(0.34, 0.0)])[0], STOP)
 
     def test_approaches_in_chassis_coordinates_and_stops_on_loss(self):
         velocity, _ = self.nav.step(None, [(0.45, 0.25), (0.40, -0.10)])

@@ -11,7 +11,8 @@ from pathlib import Path
 
 import cv2
 
-from tasks.ball_collect.navigation import Navigator
+from tasks.ball_collect.navigation import BallFollower, Navigator
+from tasks.ball_collect.openrf1 import LEGACY_CHANNEL_ORDER, WHEEL_ORDER, factory_car_command
 from tasks.ball_collect.wall_tag import WallTag
 from tasks.ball_detect.detect_cpu import BallDetector, image_frames
 from tasks.ball_detect.ground_position import BALL_RADIUS_M, GroundProjector
@@ -27,8 +28,9 @@ def load_config(path, live):
     config.update(settings)
     for key in ("wheel_radius_m", "wheelbase_m", "track_m", "fork_forward_m", "fork_width_m",
                 "tag_size_m", "search_speed_m_s", "approach_speed_m_s", "push_speed_m_s",
-                "visual_approach_speed_m_s", "visual_standoff_m", "reverse_m",
-                "max_wheel_rad_s", "max_frame_age_s", "run_limit_s", "turn_timeout_s", "diameter_scale"):
+                "visual_approach_speed_m_s", "visual_standoff_m", "push_entry_gap_m", "reverse_m",
+                "max_wheel_rad_s", "max_frame_age_s", "camera_startup_timeout_s",
+                "run_limit_s", "turn_timeout_s", "diameter_scale"):
         if not isfinite(config[key]) or config[key] <= 0:
             raise ValueError(f"{key} 须为正数")
     if config["fork_width_m"] <= 2 * BALL_RADIUS_M:
@@ -65,7 +67,21 @@ def load_config(path, live):
             raise ValueError("实车模式需要填写 A、B、C、D 的 drive_sign_abcd，每项为 -1 或 1")
         if config["max_wheel_rad_s"] * counts * 20 / tau > 1000000:
             raise ValueError("轮速上限和编码器分辨率超过固件指令范围")
+        # 老的实测文件没有轮序字段，按当时使用的接线解释。
+        config["wheel_order_abcd"] = settings.get("wheel_order_abcd", list(LEGACY_CHANNEL_ORDER))
+    order = config["wheel_order_abcd"]
+    if not isinstance(order, list) or len(order) != 4 or any(order.count(wheel) != 1 for wheel in WHEEL_ORDER):
+        raise ValueError("wheel_order_abcd 须按 A/B/C/D 顺序填入 fl、fr、rl、rr 各一次")
     return config
+
+
+def frame_age_ms(received_ns, limit_s):
+    if received_ns is None:
+        return None
+    age = (time.monotonic_ns() - received_ns) / 1e9
+    if not 0 <= age <= limit_s:
+        raise TimeoutError("相机帧已过期，停车")
+    return age * 1000
 
 
 def run(args, config):
@@ -82,8 +98,12 @@ def run(args, config):
         locate = ground.position
     else:
         raise ValueError(f"未知的 vision 配置 {vision!r}")
-    tag = WallTag(ground, config["tag_id"], config["tag_size_m"])
-    navigator = Navigator(config, ground.minimum_candidate_forward_m)
+    follower = navigator = tag = None
+    if args.follow_ball:
+        follower = BallFollower(config, ground.minimum_candidate_forward_m)
+    else:
+        navigator = Navigator(config, ground.minimum_candidate_forward_m)
+        tag = WallTag(ground, config["tag_id"], config["tag_size_m"])
     mecanum = Mecanum(config["wheel_radius_m"], config["wheelbase_m"], config["track_m"])
 
     with ExitStack() as stack:
@@ -99,9 +119,11 @@ def run(args, config):
         heading = None
         if args.drive:
             from tasks.ball_collect.openrf1 import OpenRF1, WheelHeading
-            chassis = OpenRF1(args.port, config["encoder_counts_per_rev"], config["drive_sign_abcd"])
+            order = config["wheel_order_abcd"]
+            chassis = OpenRF1(args.port, config["encoder_counts_per_rev"], config["drive_sign_abcd"], order)
             stack.callback(chassis.close)
-            heading = WheelHeading(mecanum, config["encoder_counts_per_rev"], config["max_wheel_rad_s"])
+            if navigator is not None:
+                heading = WheelHeading(mecanum, config["encoder_counts_per_rev"], config["max_wheel_rad_s"], order)
         start = last_frame = time.monotonic()
         number = 0
         while args.frames is None or number < args.frames:
@@ -111,33 +133,43 @@ def run(args, config):
             if sample is None:
                 if args.images:
                     break
-                if time.monotonic() - last_frame > config["max_frame_age_s"]:
-                    raise TimeoutError("相机帧超时，停车")
+                timeout_key = "max_frame_age_s" if number else "camera_startup_timeout_s"
+                if time.monotonic() - last_frame > config[timeout_key]:
+                    raise TimeoutError("相机帧超时，停车" if number else "等待相机首帧超时")
                 continue
             image, received_ns = sample
             last_frame = time.monotonic()
+            frame_age_ms(received_ns, config["max_frame_age_s"])
             if (image.shape[1], image.shape[0]) != ground.image_size:
                 raise ValueError(f"图像是 {image.shape[1]}×{image.shape[0]}，与标定 {ground.image_size} 不符")
-            counts = chassis.read_counts() if chassis is not None else None
+            counts = chassis.read_counts() if heading is not None else None
             sampled_at = time.monotonic()
             boxes, _ = detector.detect(image)
             positions = [locate(box) for box in boxes]
             balls = [(point["x_m"], point["y_m"]) for point in positions if point is not None]
-            pose = tag.pose(image)
-            if received_ns is not None and not 0 <= time.monotonic() - received_ns / 1e9 <= config["max_frame_age_s"]:
-                raise TimeoutError("处理完成时相机帧已过期，停车")
+            pose = tag.pose(image) if tag is not None else None
             wheel_yaw = None
             if heading is not None:
                 wheel_yaw = heading.update(counts, pose[2] if pose is not None else None, sampled_at)
-            velocity, reason = navigator.step(pose, balls, wheel_yaw=wheel_yaw)
+            if follower is not None:
+                velocity, reason = follower.step(balls)
+                phase, releases = "follow_ball", 0
+            else:
+                velocity, reason = navigator.step(pose, balls, wheel_yaw=wheel_yaw)
+                phase, releases = navigator.phase, navigator.deliveries
             wheels = mecanum.inverse(velocity, config["max_wheel_rad_s"])
+            age_ms = frame_age_ms(received_ns, config["max_frame_age_s"])
             counts = chassis.send(wheels) if chassis is not None else None
             number += 1
             print(json.dumps(dict(frame=number, vision=vision, detections=len(boxes), balls_m=balls, tag_pose=pose,
-                                  phase=navigator.phase, reason=reason, velocity=velocity, wheels=wheels,
-                                  encoder_abcd=counts, heading_rad=wheel_yaw, releases=navigator.deliveries)),
+                                  phase=phase, reason=reason, velocity=velocity, wheels=wheels,
+                                  factory_car_preview=factory_car_command(
+                                      wheels, config["wheel_radius_m"], config["wheel_order_abcd"],
+                                  ) if not args.drive else None,
+                                  encoder_abcd=counts, heading_rad=wheel_yaw, releases=releases,
+                                  frame_age_ms=age_ms)),
                   file=output, flush=True)
-            if navigator.phase == "finished":
+            if phase == "finished":
                 break
         if number == 0:
             raise RuntimeError("没有处理到图像")
@@ -149,8 +181,10 @@ def main():
     source.add_argument("--images", nargs="+", type=Path)
     source.add_argument("--serial", metavar="CAMERA_ID")
     parser.add_argument("--drive", action="store_true", help="向实车下发轮速，须使用海康相机")
-    parser.add_argument("--mission", action="store_true", help="兼容原有命令，预演默认使用完整任务逻辑")
-    parser.add_argument("--port", default="/dev/ttyS4")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--mission", action="store_true", help="兼容原有命令，默认使用完整任务逻辑")
+    mode.add_argument("--follow-ball", action="store_true", help="仅用相机跟随球，到前叉预留距离即停车")
+    parser.add_argument("--port", default="/dev/ttyS4", help="串口设备，或 ch340（通过 libusb）")
     parser.add_argument("--config", type=Path, default=ROOT / "configs/collector.json")
     parser.add_argument("--calibration", type=Path, default=ROOT / "configs/hikrobot_DA6415777.yaml")
     parser.add_argument("--threads", type=int)
@@ -175,6 +209,6 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         pass
-    except (ValueError, OSError, RuntimeError) as error:
+    except (ValueError, OSError, RuntimeError, ImportError) as error:
         print(error, file=sys.stderr)
         raise SystemExit(1)

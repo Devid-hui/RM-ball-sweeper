@@ -9,6 +9,7 @@ STOP = (0.0, 0.0, 0.0)
 MATCH_DISTANCE_M = 0.10
 POSITION_TOLERANCE_M = 0.035
 TURN_TOLERANCE_RAD = 0.05
+APPROACH_MISSES_BEFORE_RETRY = 3
 
 
 def angle_error(target, current):
@@ -41,6 +42,34 @@ def inside_zone(point, zone, margin=0.0):
     return xmin + margin <= x <= xmax - margin and ymin + margin <= y <= ymax - margin
 
 
+class BallFollower:
+    """在车体坐标中跟随同一颗球，到叉前预留距离即停车。"""
+
+    def __init__(self, config, minimum_candidate_forward_m):
+        self.stop_forward = config["fork_forward_m"] + config["visual_standoff_m"]
+        self.minimum_forward = max(config["fork_forward_m"], minimum_candidate_forward_m)
+        self.speed = config["visual_approach_speed_m_s"]
+        self.target = None
+
+    def step(self, balls):
+        if self.target is None:
+            visible = (ball for ball in balls if ball[0] >= self.minimum_forward)
+            self.target = min(visible, key=lambda ball: hypot(*ball), default=None)
+            return STOP, "confirming target" if self.target is not None else "no visible ball"
+
+        nearest = min(balls, key=lambda ball: dist(ball, self.target), default=None)
+        if nearest is None or dist(nearest, self.target) > MATCH_DISTANCE_M:
+            self.target = None
+            return STOP, "visual target lost"
+
+        self.target = nearest
+        forward, left = nearest
+        gap = forward - self.stop_forward
+        if gap <= 0.01:
+            return STOP, "ball at standoff"
+        return drive_to(STOP, (gap, left), 0, self.speed), "following ball"
+
+
 class Navigator:
     def __init__(self, config, minimum_candidate_forward_m=0.0):
         self.config = config
@@ -50,6 +79,7 @@ class Navigator:
         self.resume_point = None
         self.target = None
         self.visual_target = None  # 上一次观测到的球心，车体坐标（前、左）。
+        self.approach_misses = 0
         xmin, ymin, xmax, ymax = config["drop_zone"]
         self.drop = ((xmin + xmax) / 2, (ymin + ymax) / 2)
         self.fork = config["fork_forward_m"]
@@ -150,18 +180,21 @@ class Navigator:
         candidates = self.field_candidates(pose, balls, self.fork)
         match = self.match_target(candidates)
         if match is None:
-            return STOP, "target lost during approach"
+            return self.on_approach_miss(pose)
+        self.approach_misses = 0
         self.target, self.visual_target = match, candidates[match]
         heading = atan2(self.drop[1] - match[1], self.drop[0] - match[0])
         forward, lateral = self.visual_target
-        if (forward <= self.fork + 0.05 and abs(lateral) <= self.half_mouth / 2
+        entry_gap = self.config["push_entry_gap_m"]
+        if (forward <= self.fork + entry_gap and abs(lateral) <= self.half_mouth / 2
                 and abs(angle_error(heading, pose[2])) <= 0.10):
             self.heading, self.phase = heading, "push"
             return STOP, "fork aligned"
         dx, dy = pose[0] - match[0], pose[1] - match[1]
         ux, uy = cos(heading), sin(heading)
         ahead, side = dx * ux + dy * uy, -dx * uy + dy * ux
-        behind, offset = self.fork + 0.02, 0.0
+        # 在进入推送的距离略内侧瞄准，避免逼到镜头下方才要求对准。
+        behind, offset = self.fork + 0.9 * entry_gap, 0.0
         # 车身与球并排或越过球时，先侧移让出导杆，再到球后方。
         if self.staging and ahead > -behind / 2:
             clearance = self.config["track_m"] / 2 + self.half_mouth + 0.06
@@ -171,6 +204,18 @@ class Navigator:
             self.staging = False
         point = (match[0] - behind * ux - offset * uy, match[1] - behind * uy + offset * ux)
         return drive_to(pose, point, heading, self.config["approach_speed_m_s"]), "approach ball"
+
+    def on_approach_miss(self, pose):
+        self.approach_misses += 1
+        # 结合最后一次球的场地坐标和当前车位，判断球是否可能已进入车头盲区。
+        clearance = self.fork + self.config["visual_standoff_m"] + BALL_RADIUS_M
+        too_close = self.target is None or dist(pose[:2], self.target) <= clearance
+        if too_close or self.approach_misses < APPROACH_MISSES_BEFORE_RETRY:
+            return STOP, "target lost during approach"
+        self.target = self.visual_target = None
+        self.approach_misses = 0
+        self.phase = "lane_start"
+        return STOP, "target lost, resuming lane"
 
     def push(self, pose):
         ux, uy = cos(self.heading), sin(self.heading)
@@ -213,6 +258,7 @@ class Navigator:
         if self.phase in ("visual_approach", "wait_for_tag"):
             return self.approach_by_camera(pose, balls)
         if pose is None:
+            self.approach_misses = 0
             if self.phase not in ("lane_start", "search", "approach"):
                 return STOP, "wall tag unavailable"
             if self.phase == "search":

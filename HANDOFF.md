@@ -1,5 +1,25 @@
 # 采球车项目交接
 
+- 实车直线测速由用户现场确认。四轮 `$Car:0.1,0.1,0.1,0.1!` 下直行恢复正常，1 m 用时 41 s，平均车速约 0.0244 m/s。此结果对应本次地面和指令，未用于修改速度换算。
+
+## 2026-11-28 代码核对
+
+- Python 采球入口已连接识球、测距、墙标定位、巡线推送和轮速换算。补了对准阶段持续丢球的恢复，近叉盲区继续停车。两张实拍图已用 HSV 和 ONNX 在 Mac 回放。
+- 厂商工程的 C26 编码器补丁及其只读探测用法见 [固件说明](firmware/openrf1/README.md#c26-v22-编码器反馈补丁)。补丁能在厂商源码副本应用，上位机转速换算已用虚拟串口测试。待 Keil 生成 HEX、上板核对计数和轮向。当前自主驱动入口使用 COLLECT1，厂商路径仍须完成断联停车与控制验证。
+
+## 2026-11-27 板端联调
+
+- 在 ROCK 4D 的 7.1.3 aarch64 系统，从 GitHub `f77e280` 构建运动学和相机绑定。板端验证目录为 `/home/ubuntu/ball-integration.DHefoj`，另有原项目工作区。
+- 直接运行 Python 时海康 SDK 能开流但没有帧。启动进程前将 MVS 库目录加入 `LD_LIBRARY_PATH` 后恢复，启动脚本为 `tools/run_collector.sh`。HSV 和 ONNX 相机预演各完成 60 帧，日志为 `verified-hsv.jsonl` 和 `verified-onnx.jsonl`，帧年龄中位数分别为 45.9 和 400.4 ms。镜头内没有球或墙标，决策持续发出零速建议。首帧等待和运行中的帧时限分开配置。
+- 板端 CH340 经 libusb 向 OpenRF1 发送全零 `$Car` 得到 `cmdOk`。当前控制板没有回应 `COLLECT1` 的 `VER` 握手。已加入 `--port ch340` 的传输支持和 A/B/C/D 轮序配置。COLLECT1 编码器极性仍与固件固定值一致，烧录后须逐轮核对。
+- 当前相机参数投影显示，球心在原点前方 0.11 m 时已超出图像下缘。把已对准时的推送入口设为距叉前缘 0.10 m 内，实车用近距球位复核。合成球和墙标图像回放完成进入推送、丢标停车、到投放位和退离。90° 转向由模拟航向与编码器测试覆盖。
+- 已交叉构建 `build-openrf1/openrf1_collector.hex`，仅运行了主机侧控制协议与超时测试。当前控制板保留已验证的厂商固件。完整实车运行还需核对电机实测计数、编码器极性、轮距和标签场地参数。
+- 当前联调按厂商固件的 `$Car` 推进。用 `tools/check_openrf1_uart.py --port ch340 --factory-car` 复核零速应答，预演 JSON 的 `factory_car_preview` 显示轮端 m/s 指令。保留 `COLLECT1` 作为已有的运行路径，厂商全程自主控制的轮速或航向反馈与断联表现待实测。
+- 用户确认车上固件与已解压目录中的 C26 V2.2 `Output/template.hex` 一致。该文件的 SHA-256 记录于 `configs/chassis_link.yaml`，来源为马达编码器指南下的 `03.源代码程序/C26 V2.2/C26 V2.2/C26 V2.2/`。同名 ZIP 内的 HEX 经 Intel HEX 解码后含不同的 Flash 数据，归档内文件应以自己的校验值标识。
+- C26 V2.2 源码经 USART2 回应 `$Car`，每 20 ms 读取编码器并计算四轮速度，供板内 PID 和 OLED 使用。当前串口解析未找到轮速上报或按通信超时清零的路径。`$TZ!` 会主动停车。固件参数为 1560 计数/圈和 80 mm 轮径。用户确认实车为 1:90、13 线、四倍频，上位机参数更新为 4680 计数/输出轮圈。实车为直径 60 mm 的麦克纳姆轮，上位机轮半径为 0.03 m。按两端参数计算，厂商固件对同样的编码器脉冲估计的轮速为实车值的 4 倍，须以台架速度实测校核。
+- 轮速反馈实测用 ROCK 4D 的 CH340 串口。全零 `$Car` 返回 `cmdOk`，随后约 6 秒无额外数据。首次 90 秒被动监听未收到数据，期间转轮情况未确认。复测监听约 75 秒，用户在窗口内确认手转了前左轮，串口仍收到 0 字节。现场无 OLED，板内前左编码器计数仍待独立确认。原始记录位于板端验证目录的 `wheel-feedback-zero.jsonl`、`wheel-feedback-handturn.jsonl` 和 `wheel-feedback-supervised.WvCydS.jsonl`。
+- 架空复核 A 通道时发送 `$Car:0.1,0,0,0!`，约 1.5 秒后发送全零轮速，两条指令均收到 `cmdOk`。用户观察到只有前左轮转动并停下，确认上一轮手转的是 A 通道所驱动的轮子。
+
 记录日期为 2026-11-20。以下运行状态以本轮最后一次实测为准。接手后先重新确认 SSH 地址、运行内核和 Git 状态。
 
 ## 项目目标与限制
@@ -51,10 +71,10 @@ Mac 上调试串口最近为 /dev/cu.usbserial-1140，1500000 波特率，8N1。
 本轮实时联测中，旧采图入口曾保存 3 张图。其后相机在 USB3 的 5000M 链路被系统识别，
 但原采图入口和实时检测入口均出现 MVS USB 读写失败，重新插接后也出现枚举序列号为空。
 最后一轮在 MVS 重试期间收到中断信号，进程被测试超时器终止。
-当前无有效的实时相机 YOLO 帧率，优先恢复 MVS 稳定枚举和取图。
+该次枚举故障之后的实时相机预演结果见 2026-11-27 板端联调。
 板上专用 udev 规则为 /etc/udev/rules.d/99-hikrobot-da6415777.rules，用户组 hikrobot-camera。
 configs/hikrobot_DA6415777.yaml 复用同序列号 RM omni1 内参与畸变，暂以当前采集画幅 1440×1080 试跑。原始标定画幅待核验。安装参数为横纵偏移零、光心高 0.10 m、三个角度零。
-ROCK 4D 到 OpenRF1 使用 UART4-M1（/dev/ttyS4）连接 USART2，115200、8N1、无流控。2026-11-22 通信包记录已实测 PING/PONG。配置见 configs/chassis_link.yaml，应用串口检查见 tools/check_openrf1_uart.py。电机控制、速度和反馈协议待定义。
+ROCK 4D 到 OpenRF1 的 GPIO UART4-M1（/dev/ttyS4）和 CH340 路径均使用 115200、8N1、无流控。GPIO 路径的 PING/PONG 属于 2026-11-22 通信包的测试固件，当前厂商固件的轮速指令通过 CH340 验证。配置见 configs/chassis_link.yaml，串口检查见 tools/check_openrf1_uart.py。
 
 ## 当前代码结构
 
@@ -70,7 +90,7 @@ ROCK 4D 到 OpenRF1 使用 UART4-M1（/dev/ttyS4）连接 USART2，115200、8N1�
 - README.md 和 CMakeLists.txt 给出了现有入口与构建方式。
 
 检测入口可经 `--ground-calibration` 输出车体坐标和当帧最近的候选球。
-棋盘格标定入口是 `tools/calibrate_ball_camera.py`。定位和候选选择已用模拟标定验证，实车定位误差、跨帧目标确认、运动建议和底盘接入仍待完成。
+棋盘格标定入口是 `tools/calibrate_ball_camera.py`。定位和候选选择已用模拟标定验证。跨帧目标确认、运动建议和 COLLECT1 底盘接口已接入 Python 运行入口，实车定位误差和整车任务待验收。
 
 ## 原始模型与数据
 

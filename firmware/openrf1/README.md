@@ -15,6 +15,25 @@ ROCK 4D 经 CH340 USB 转 TTL 模块接到 OpenRF1 的 MV 口（USART2），串�
 
 本次 A、C 的轮位与 11 月 25 日原接线记录互换。该表记录驱动通道对应的实际轮位。接入 `COLLECT1` 前，还需逐轮核对编码器通道、计数方向和驱动极性，并让上层轮速重排及反馈映射与现接线一致。
 
+## C26 V2.2 编码器反馈补丁
+
+[补丁](c26-encoder-feedback.patch) 适用于控制板指南解压目录中的 C26 V2.2 工程。它复用厂商 PID 每 20 ms 读取的编码器增量，并通过 MV 口返回累计计数。保留原版 HEX 供恢复。在 C26 源码副本的根目录执行以下命令，将路径替换为补丁的绝对路径。
+
+```bash
+git apply --check --ignore-space-change /path/to/c26-encoder-feedback.patch
+git apply --ignore-space-change /path/to/c26-encoder-feedback.patch
+```
+
+在 Windows Keil 用工程原配 ARMCC 5.06 打开 `Project/RVMDK（uv5）/BH-STM32.uvprojx`，构建产物为 `Output/c26_feedback.hex`。候选补丁已做本地应用校验，Keil 构建和上板验证待做。该版本只增加查询功能，断联停车仍待实测和处理。
+
+烧录候选版本后，用 115200、8N1 连接 OpenRF1 的 MV 口，从项目根目录运行以下命令。普通串口路径使用 pyserial。ROCK 4D 上如使用 PyUSB 访问同一 CH340，端口参数填 `ch340`。
+
+```bash
+python3 tools/check_openrf1_uart.py --port /dev/cu.usbserial-XXXX --c26-encoders 20
+```
+
+查询只发 `$ENC!`，回复为 `ENC <sample> <A> <B> <C> <D>` 加 CRLF，五个字段均为无符号 32 位。首条只有计数，后续用相邻回复的计数差和 MCU 采样间隔计算 `rpm_abcd`。静止时四路转速应为零，逐轮转动时观察通道和正负号。默认按每个输出轮圈 4680 个计数换算，可用 `--counts-per-rev` 覆盖。
+
 ## 点动与采球固件协议
 
 适用于 STM32F103RCT6。复位后等待串口命令。板载 USB-TTL（USART1）和 ROCK 4D 所接的 MV 口（USART2）均为 115200、8N1、无流控。每条命令以 LF 结束，支持 CRLF。点动固件 `openrf1_wheel_jog` 将回复发到两个串口，测试时使用一个发送端。

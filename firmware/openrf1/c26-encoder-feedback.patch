@@ -1,0 +1,97 @@
+--- a/User/app_motor.c
++++ b/User/app_motor.c
+@@ -22,14 +22,39 @@
+ }
+ 
+ /* 电机运行函数 */
++static volatile uint32_t encoder_samples;
++static volatile uint32_t encoder_total[4];
++
++void app_motor_encoder_snapshot(uint32_t *samples, uint32_t counts[4])
++{
++    uint32_t irq_mask = __get_PRIMASK();
++    unsigned i;
++
++    __disable_irq();
++    *samples = encoder_samples;
++    for (i = 0; i < 4; ++i) counts[i] = encoder_total[i];
++    __set_PRIMASK(irq_mask);
++}
++
+ void app_motor_run(void)
+ {
+ 
+     // 通过编码器获取车轮实时转速m/s
+-    Wheel_A.RT = (float)(ENCODER_A_GetCounter() * MEC_WHEEL_SCALE);
+-    Wheel_B.RT = (float)(ENCODER_B_GetCounter() * MEC_WHEEL_SCALE);
+-    Wheel_C.RT = (float)(ENCODER_C_GetCounter() * MEC_WHEEL_SCALE);
+-    Wheel_D.RT = (float)(ENCODER_D_GetCounter() * MEC_WHEEL_SCALE);
++    int16_t delta_a = ENCODER_A_GetCounter();
++    int16_t delta_b = ENCODER_B_GetCounter();
++    int16_t delta_c = ENCODER_C_GetCounter();
++    int16_t delta_d = ENCODER_D_GetCounter();
++
++    encoder_total[0] += (uint32_t)delta_a;
++    encoder_total[1] += (uint32_t)delta_b;
++    encoder_total[2] += (uint32_t)delta_c;
++    encoder_total[3] += (uint32_t)delta_d;
++    ++encoder_samples;
++
++    Wheel_A.RT = (float)(delta_a * MEC_WHEEL_SCALE);
++    Wheel_B.RT = (float)(delta_b * MEC_WHEEL_SCALE);
++    Wheel_C.RT = (float)(delta_c * MEC_WHEEL_SCALE);
++    Wheel_D.RT = (float)(delta_d * MEC_WHEEL_SCALE);
+ 	
+ 	
+     // 利用PID算法计算电机PWM值
+--- a/User/app_motor.h
++++ b/User/app_motor.h
+@@ -28,6 +28,7 @@
+ 
+ void app_motor_init(void);
+ void app_motor_run(void);
++void app_motor_encoder_snapshot(uint32_t *samples, uint32_t counts[4]);
+ 
+ void motor_speed_set(float A,float B,float C,float D);
+ #endif
+--- a/User/Components/y_global/y_global.c
++++ b/User/Components/y_global/y_global.c
+@@ -1,5 +1,7 @@
+ #include "./y_global/y_global.h"
+ #include "stm32f10x_conf.h"
++#include "app_motor.h"
++#include <string.h>
+ 
+ char cmd_return[CMD_RETURN_SIZE]; // 用来处理临时的字符串指令
+ u8 group_do_ok = 1;               // 完成动作组标记1
+@@ -270,6 +272,19 @@
+     const unsigned char *display_chars;
+     int num_chars;
+ 
++    if (strcmp(cmd, "$ENC!") == 0)
++    {
++        uint32_t samples, counts[4];
++        char reply[80];
++        app_motor_encoder_snapshot(&samples, counts);
++        sprintf(reply, "ENC %lu %lu %lu %lu %lu\r\n",
++                (unsigned long)samples, (unsigned long)counts[0],
++                (unsigned long)counts[1], (unsigned long)counts[2],
++                (unsigned long)counts[3]);
++        uart2_send_str(reply);
++        return;
++    }
++
+     uart1_send_str(cmd);
+     if (pos = str_contain_str(cmd, "$DRS!"), pos)
+     {
+--- a/Project/RVMDK（uv5）/BH-STM32.uvprojx
++++ b/Project/RVMDK（uv5）/BH-STM32.uvprojx
+@@ -50,7 +50,7 @@
+             <InvalidFlash>1</InvalidFlash>
+           </TargetStatus>
+           <OutputDirectory>..\..\Output\</OutputDirectory>
+-          <OutputName>template</OutputName>
++          <OutputName>c26_feedback</OutputName>
+           <CreateExecutable>1</CreateExecutable>
+           <CreateLib>0</CreateLib>
+           <CreateHexFile>1</CreateHexFile>

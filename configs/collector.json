@@ -1,9 +1,10 @@
 {
-  "wheel_radius_m": 0.05,
+  "wheel_radius_m": 0.03,
   "wheelbase_m": 0.30,
   "track_m": 0.20,
-  "encoder_counts_per_rev": 1320,
+  "encoder_counts_per_rev": 4680,
   "drive_sign_abcd": [1, 1, 1, 1],
+  "wheel_order_abcd": ["fl", "fr", "rl", "rr"],
   "drive_calibrated": false,
   "vision": "hsv-diameter",
   "hsv_lower": [18, 45, 35],
@@ -20,12 +21,14 @@
   "approach_speed_m_s": 0.10,
   "visual_approach_speed_m_s": 0.05,
   "visual_standoff_m": 0.08,
+  "push_entry_gap_m": 0.10,
   "push_speed_m_s": 0.05,
   "reverse_m": 0.20,
   "turn_direction": 1,
   "turn_timeout_s": 10.0,
   "max_wheel_rad_s": 6.0,
   "max_frame_age_s": 0.60,
+  "camera_startup_timeout_s": 8.0,
   "run_limit_s": 180.0,
   "max_deliveries": 5
 }
