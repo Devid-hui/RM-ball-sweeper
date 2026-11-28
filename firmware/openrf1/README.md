@@ -24,7 +24,7 @@ git apply --check --ignore-space-change /path/to/c26-encoder-feedback.patch
 git apply --ignore-space-change /path/to/c26-encoder-feedback.patch
 ```
 
-在 Windows Keil 用工程原配 ARMCC 5.06 打开 `Project/RVMDK（uv5）/BH-STM32.uvprojx`，构建产物为 `Output/c26_feedback.hex`。候选补丁已做本地应用校验，Keil 构建和上板验证待做。该版本只增加查询功能，断联停车仍待实测和处理。
+在 Windows Keil 用工程原配 ARMCC 5.06 打开 `Project/RVMDK（uv5）/BH-STM32.uvprojx`，构建产物为 `Output/c26_feedback.hex`。2026-11-28 已构建并上板，ROCK 4D 通过 MV 口连续读取了 30 条静止编码器回复。逐轮动态计数和断联停车待实测。
 
 烧录候选版本后，用 115200、8N1 连接 OpenRF1 的 MV 口，从项目根目录运行以下命令。普通串口路径使用 pyserial。ROCK 4D 上如使用 PyUSB 访问同一 CH340，端口参数填 `ch340`。
 
@@ -33,6 +33,19 @@ python3 tools/check_openrf1_uart.py --port /dev/cu.usbserial-XXXX --c26-encoders
 ```
 
 查询只发 `$ENC!`，回复为 `ENC <sample> <A> <B> <C> <D>` 加 CRLF，五个字段均为无符号 32 位。首条只有计数，后续用相邻回复的计数差和 MCU 采样间隔计算 `rpm_abcd`。静止时四路转速应为零，逐轮转动时观察通道和正负号。默认按每个输出轮圈 4680 个计数换算，可用 `--counts-per-rev` 覆盖。
+
+## C26 V2.2 轮速指令超时停车补丁
+
+在已应用编码器反馈补丁的 C26 源码副本上，再应用 [超时停车补丁](c26-drive-watchdog.patch)。
+
+```bash
+git apply --check --ignore-space-change /path/to/c26-drive-watchdog.patch
+git apply --ignore-space-change /path/to/c26-drive-watchdog.patch
+```
+
+使用原 Keil 工程构建 `Output/c26_feedback_watchdog.hex`。每收到一条完整有效的非零 `$Car` 指令，就重新计时。第 25 次电机控制循环仍无新轮速指令时，清空四轮目标，复用原厂零速路径将 PWM 置零。控制周期为 20 ms，超时约 500 ms。显式全零指令在下一个控制周期归零，`$ENC!` 和无效的轮速命令不会延长时限。有效 `$Car` 会退出板内自主模式，由串口接管速度。
+
+Keil 构建和架空测试待做。架空复测时，先确认全零指令和编码器查询正常，再对 A 轮发一次非零命令，保持串口静默 1.2 秒。随后读两次计数，确认计数已稳定，再发全零指令结束。轮子从 PWM 归零到物理静止的时间取决于惯性。
 
 ## 点动与采球固件协议
 

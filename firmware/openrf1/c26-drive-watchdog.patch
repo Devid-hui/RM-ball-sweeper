@@ -1,0 +1,101 @@
+--- a/User/app_motor.c
++++ b/User/app_motor.c
+@@ -1,4 +1,8 @@
+ #include "app_motor.h"
++
++// The control loop runs every 20 ms. Only a valid $Car command renews this timer.
++#define UART_DRIVE_TIMEOUT_TICKS 25u
++static volatile uint8_t uart_drive_ticks;
+ 
+ /**
+  * @简  述  设置 A B C D轮子的速度，单位m/s
+@@ -12,6 +16,15 @@
+     Wheel_C.TG = C;
+     Wheel_B.TG = B;
+     Wheel_D.TG = D;
++}
++
++void app_motor_uart_speed_set(float a, float b, float c, float d)
++{
++    uint32_t irq_mask = __get_PRIMASK();
++    __disable_irq();
++    motor_speed_set(a, b, c, d);
++    uart_drive_ticks = (a != 0 || b != 0 || c != 0 || d != 0) ? UART_DRIVE_TIMEOUT_TICKS : 0;
++    __set_PRIMASK(irq_mask);
+ }
+ 
+ /* 初始化电机相关 */
+@@ -44,6 +57,11 @@
+     int16_t delta_b = ENCODER_B_GetCounter();
+     int16_t delta_c = ENCODER_C_GetCounter();
+     int16_t delta_d = ENCODER_D_GetCounter();
++
++    if (uart_drive_ticks != 0 && --uart_drive_ticks == 0)
++    {
++        motor_speed_set(0, 0, 0, 0);
++    }
+ 
+     encoder_total[0] += (uint32_t)delta_a;
+     encoder_total[1] += (uint32_t)delta_b;
+--- a/User/app_motor.h
++++ b/User/app_motor.h
+@@ -28,6 +28,7 @@
+ 
+ void app_motor_init(void);
+ void app_motor_run(void);
++void app_motor_uart_speed_set(float a, float b, float c, float d);
+ void app_motor_encoder_snapshot(uint32_t *samples, uint32_t counts[4]);
+ 
+ void motor_speed_set(float A,float B,float C,float D);
+--- a/User/Components/y_global/y_global.c
++++ b/User/Components/y_global/y_global.c
+@@ -1,6 +1,7 @@
+ #include "./y_global/y_global.h"
+ #include "stm32f10x_conf.h"
+ #include "app_motor.h"
++#include <float.h>
+ #include <string.h>
+ 
+ char cmd_return[CMD_RETURN_SIZE]; // 用来处理临时的字符串指令
+@@ -344,15 +345,21 @@
+         pwmServo_angle_set(255, 1500, 2000);
+         AI_mode = 255;
+     }
+-    else if (pos = str_contain_str(cmd, "$Car:"), pos)
+-    {
+-				uart2_send_str("cmdOk");
+-        /* 小车运动参数 */
+-        float a = 0, b = 0, c = 0, d = 0;
+-        if (sscanf((char *)cmd, "$Car:%f,%f,%f,%f!", &a, &b, &c, &d))
+-        {
+-            motor_speed_set(a, b, c, d);
+-        }
++    else if (strncmp(cmd, "$Car:", 5) == 0)
++    {
++        float a, b, c, d;
++        char terminator, trailing;
++        int fields = sscanf(cmd, "$Car:%f,%f,%f,%f%c%c", &a, &b, &c, &d, &terminator, &trailing);
++        if (fields != 5 || terminator != '!' ||
++            !(a >= -FLT_MAX && a <= FLT_MAX && b >= -FLT_MAX && b <= FLT_MAX &&
++              c >= -FLT_MAX && c <= FLT_MAX && d >= -FLT_MAX && d <= FLT_MAX))
++        {
++            uart2_send_str("ERR");
++            return;
++        }
++        AI_mode = 255;
++        app_motor_uart_speed_set(a, b, c, d);
++        uart2_send_str("cmdOk");
+     }
+     else if (pos = str_contain_str(cmd, "$ZNXJ!"), pos)
+     {
+--- a/Project/RVMDK（uv5）/BH-STM32.uvprojx
++++ b/Project/RVMDK（uv5）/BH-STM32.uvprojx
+@@ -50,7 +50,7 @@
+             <InvalidFlash>1</InvalidFlash>
+           </TargetStatus>
+           <OutputDirectory>..\..\Output\</OutputDirectory>
+-          <OutputName>c26_feedback</OutputName>
++          <OutputName>c26_feedback_watchdog</OutputName>
+           <CreateExecutable>1</CreateExecutable>
+           <CreateLib>0</CreateLib>
+           <CreateHexFile>1</CreateHexFile>

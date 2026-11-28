@@ -12,7 +12,9 @@ from pathlib import Path
 import cv2
 
 from tasks.ball_collect.navigation import BallFollower, Navigator
-from tasks.ball_collect.openrf1 import LEGACY_CHANNEL_ORDER, WHEEL_ORDER, factory_car_command
+from tasks.ball_collect.openrf1 import (
+    C26, ENCODER_SIGN_ABCD, LEGACY_CHANNEL_ORDER, WHEEL_ORDER, OpenRF1, WheelHeading, c26_command,
+)
 from tasks.ball_collect.wall_tag import WallTag
 from tasks.ball_detect.detect_cpu import BallDetector, image_frames
 from tasks.ball_detect.ground_position import BALL_RADIUS_M, GroundProjector
@@ -22,7 +24,7 @@ from tasks.ball_detect.hsv import HsvBallDetector
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def load_config(path, live):
+def load_config(path, live, protocol="collect1"):
     config = json.loads((ROOT / "configs/collector.json").read_text())
     settings = json.loads(path.read_text())
     config.update(settings)
@@ -30,7 +32,7 @@ def load_config(path, live):
                 "tag_size_m", "search_speed_m_s", "approach_speed_m_s", "push_speed_m_s",
                 "visual_approach_speed_m_s", "visual_standoff_m", "push_entry_gap_m", "reverse_m",
                 "max_wheel_rad_s", "max_frame_age_s", "camera_startup_timeout_s",
-                "run_limit_s", "turn_timeout_s", "diameter_scale"):
+                "run_limit_s", "turn_timeout_s", "diameter_scale", "c26_command_scale"):
         if not isfinite(config[key]) or config[key] <= 0:
             raise ValueError(f"{key} 须为正数")
     if config["fork_width_m"] <= 2 * BALL_RADIUS_M:
@@ -55,20 +57,27 @@ def load_config(path, live):
     if type(config["turn_direction"]) is not int or abs(config["turn_direction"]) != 1:
         raise ValueError("turn_direction 须为 1（左转）或 -1（右转）")
     if live:
+        if protocol == "c26" and config["c26_watchdog_verified"] is not True:
+            raise ValueError("C26 实车需要烧录超时停车固件并架空验收，再设置 c26_watchdog_verified 为 true")
         # 旧的实车配置已经要求用户显式填写这两项；预演的示例值不能驱动车轮。
         counts, signs = settings.get("encoder_counts_per_rev"), settings.get("drive_sign_abcd")
         if settings.get("drive_calibrated", counts is not None and signs is not None) is not True:
             raise ValueError("实测每圈计数和轮向后，在实车配置中设置 drive_calibrated 为 true")
         if type(counts) is not int or counts <= 0:
             raise ValueError("实车模式需要填写每轮完整一圈的 encoder_counts_per_rev")
+        if signs is None:
+            raise ValueError("实车模式需要填写 A、B、C、D 的 drive_sign_abcd")
+        if protocol == "collect1" and config["max_wheel_rad_s"] * counts * 20 / tau > 1000000:
+            raise ValueError("轮速上限和编码器分辨率超过固件指令范围")
+        # 老的实测文件没有轮序字段，按当时使用的接线解释。
+        if protocol == "collect1":
+            config["wheel_order_abcd"] = settings.get("wheel_order_abcd", list(LEGACY_CHANNEL_ORDER))
+    for key in ("drive_sign_abcd", "c26_encoder_sign_abcd"):
+        signs = config[key]
         if not isinstance(signs, list) or len(signs) != 4 or any(
             type(sign) is not int or abs(sign) != 1 for sign in signs
         ):
-            raise ValueError("实车模式需要填写 A、B、C、D 的 drive_sign_abcd，每项为 -1 或 1")
-        if config["max_wheel_rad_s"] * counts * 20 / tau > 1000000:
-            raise ValueError("轮速上限和编码器分辨率超过固件指令范围")
-        # 老的实测文件没有轮序字段，按当时使用的接线解释。
-        config["wheel_order_abcd"] = settings.get("wheel_order_abcd", list(LEGACY_CHANNEL_ORDER))
+            raise ValueError(f"{key} 须按 A/B/C/D 填写四项，每项为 -1 或 1")
     order = config["wheel_order_abcd"]
     if not isinstance(order, list) or len(order) != 4 or any(order.count(wheel) != 1 for wheel in WHEEL_ORDER):
         raise ValueError("wheel_order_abcd 须按 A/B/C/D 顺序填入 fl、fr、rl、rr 各一次")
@@ -82,6 +91,47 @@ def frame_age_ms(received_ns, limit_s):
     if not 0 <= age <= limit_s:
         raise TimeoutError("相机帧已过期，停车")
     return age * 1000
+
+
+def collection_frames(args, config):
+    if args.images:
+        yield from image_frames(args.images, raw_orientation=True)
+        return
+
+    from ball_camera import HikCamera
+
+    camera = HikCamera(args.serial)
+    start = last_frame = time.monotonic()
+    timeout = config["camera_startup_timeout_s"]
+    while time.monotonic() - start < config["run_limit_s"]:
+        sample = camera.read()
+        if sample is not None:
+            last_frame = time.monotonic()
+            timeout = config["max_frame_age_s"]
+            yield sample
+        elif time.monotonic() - last_frame > timeout:
+            raise TimeoutError("等待相机帧超时，停车")
+
+
+def open_chassis(args, config, mecanum, stack):
+    if not args.drive:
+        return None, None
+    c26 = args.protocol == "c26"
+    counts = config["encoder_counts_per_rev"]
+    order = config["wheel_order_abcd"]
+    port = args.port or ("ch340" if c26 else "/dev/ttyS4")
+    if c26:
+        chassis = C26(port, config)
+    else:
+        chassis = OpenRF1(port, counts, config["drive_sign_abcd"], order)
+    stack.callback(chassis.close)
+    if not c26 and args.follow_ball:
+        return chassis, None
+    signs = config["c26_encoder_sign_abcd"] if c26 else ENCODER_SIGN_ABCD
+    heading = WheelHeading(
+        mecanum, counts, config["max_wheel_rad_s"], order, c26=c26, encoder_sign_abcd=signs,
+    )
+    return chassis, heading
 
 
 def run(args, config):
@@ -108,42 +158,16 @@ def run(args, config):
 
     with ExitStack() as stack:
         output = stack.enter_context(args.output.open("x")) if args.output else sys.stdout
-        if args.images:
-            frames = image_frames(args.images, raw_orientation=True)
-            read = lambda: next(frames, None)
-        else:
-            from ball_camera import HikCamera
-            camera = HikCamera(args.serial)
-            read = camera.read
-        chassis = None
-        heading = None
-        if args.drive:
-            from tasks.ball_collect.openrf1 import OpenRF1, WheelHeading
-            order = config["wheel_order_abcd"]
-            chassis = OpenRF1(args.port, config["encoder_counts_per_rev"], config["drive_sign_abcd"], order)
-            stack.callback(chassis.close)
-            if navigator is not None:
-                heading = WheelHeading(mecanum, config["encoder_counts_per_rev"], config["max_wheel_rad_s"], order)
-        start = last_frame = time.monotonic()
+        frames = collection_frames(args, config)
+        stack.callback(frames.close)
+        chassis, heading = open_chassis(args, config, mecanum, stack)
+        use_c26 = chassis is not None and args.protocol == "c26"
         number = 0
-        while args.frames is None or number < args.frames:
-            if not args.images and time.monotonic() - start >= config["run_limit_s"]:
-                break
-            sample = read()
-            if sample is None:
-                if args.images:
-                    break
-                timeout_key = "max_frame_age_s" if number else "camera_startup_timeout_s"
-                if time.monotonic() - last_frame > config[timeout_key]:
-                    raise TimeoutError("相机帧超时，停车" if number else "等待相机首帧超时")
-                continue
-            image, received_ns = sample
-            last_frame = time.monotonic()
+        for number, (image, received_ns) in enumerate(frames, 1):
             frame_age_ms(received_ns, config["max_frame_age_s"])
             if (image.shape[1], image.shape[0]) != ground.image_size:
                 raise ValueError(f"图像是 {image.shape[1]}×{image.shape[0]}，与标定 {ground.image_size} 不符")
-            counts = chassis.read_counts() if heading is not None else None
-            sampled_at = time.monotonic()
+            counts, sampled_at = chassis.read_feedback() if heading is not None else (None, None)
             boxes, _ = detector.detect(image)
             positions = [locate(box) for box in boxes]
             balls = [(point["x_m"], point["y_m"]) for point in positions if point is not None]
@@ -159,17 +183,18 @@ def run(args, config):
                 phase, releases = navigator.phase, navigator.deliveries
             wheels = mecanum.inverse(velocity, config["max_wheel_rad_s"])
             age_ms = frame_age_ms(received_ns, config["max_frame_age_s"])
-            counts = chassis.send(wheels) if chassis is not None else None
-            number += 1
+            if chassis is not None:
+                reply_counts = chassis.send(wheels)
+                if reply_counts is not None:
+                    counts = reply_counts
             print(json.dumps(dict(frame=number, vision=vision, detections=len(boxes), balls_m=balls, tag_pose=pose,
                                   phase=phase, reason=reason, velocity=velocity, wheels=wheels,
-                                  factory_car_preview=factory_car_command(
-                                      wheels, config["wheel_radius_m"], config["wheel_order_abcd"],
-                                  ) if not args.drive else None,
-                                  encoder_abcd=counts, heading_rad=wheel_yaw, releases=releases,
+                                  factory_car_preview=c26_command(wheels, config) if chassis is None else None,
+                                  encoder_abcd=counts, encoder_sample=sampled_at if use_c26 else None,
+                                  heading_rad=wheel_yaw, releases=releases,
                                   frame_age_ms=age_ms)),
                   file=output, flush=True)
-            if phase == "finished":
+            if phase == "finished" or number == args.frames:
                 break
         if number == 0:
             raise RuntimeError("没有处理到图像")
@@ -180,11 +205,13 @@ def main():
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--images", nargs="+", type=Path)
     source.add_argument("--serial", metavar="CAMERA_ID")
-    parser.add_argument("--drive", action="store_true", help="向实车下发轮速，须使用海康相机")
+    parser.add_argument("--drive", action="store_true", help="启用实车轮速和编码器反馈")
+    parser.add_argument("--protocol", choices=["c26", "collect1"], default="c26",
+                        help="默认 C26，collect1 供候选固件联调")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--mission", action="store_true", help="兼容原有命令，默认使用完整任务逻辑")
     mode.add_argument("--follow-ball", action="store_true", help="仅用相机跟随球，到前叉预留距离即停车")
-    parser.add_argument("--port", default="/dev/ttyS4", help="串口设备，或 ch340（通过 libusb）")
+    parser.add_argument("--port", help="串口设备或 ch340（默认 C26: ch340，COLLECT1: /dev/ttyS4）")
     parser.add_argument("--config", type=Path, default=ROOT / "configs/collector.json")
     parser.add_argument("--calibration", type=Path, default=ROOT / "configs/hikrobot_DA6415777.yaml")
     parser.add_argument("--threads", type=int)
@@ -196,7 +223,11 @@ def main():
         parser.error("图片回放不能驱动车轮")
     if args.frames is not None and args.frames < 1:
         parser.error("--frames 须为正整数")
-    run(args, load_config(args.config, args.drive))
+    try:
+        config = load_config(args.config, args.drive, args.protocol)
+    except ValueError as error:
+        parser.error(str(error))
+    run(args, config)
 
 
 def stop_on_signal(_signum, _frame):

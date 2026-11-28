@@ -10,8 +10,10 @@ parity: none
 stop_bits: 1
 flow_control: none
 
-# 此项描述现有 --drive 的协议。厂商固件使用以下独立的已验证路径。
-protocol: COLLECT1
+# 当前实车已用厂商协议完成单轮和直线测试。
+protocol: car
+experimental_collect1:
+  verified_on_current_controller: false
 factory_link:
   adapter: ch340
   protocol: car

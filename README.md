@@ -30,7 +30,7 @@ BALL_COLLECTOR_BUILD_DIR="$PWD/build-collector" tools/run_collector.sh \
   --images test/picture/*.jpg --vision onnx-ground --follow-ball
 ```
 
-相机预演改用 `--serial DA6415777`。单球跟随的实车下发与完整任务共用 `--drive`、实测轮向配置和 COLLECT1 传输。使用厂商 C26 V2.2 时，下发字段可从预演检查。C26 自主下发仍取决于控制板端的断联停车验证。
+相机预演改用 `--serial DA6415777`。跟随模式和完整任务共用 C26 串口入口。
 
 ### 完整巡线与推送
 
@@ -71,12 +71,15 @@ tools/run_collector.sh --serial DA6415777 --frames 60
 python3 tools/check_openrf1_uart.py --port ch340 --factory-car
 ```
 
-全程 `--drive` 目前接的是 `COLLECT1` 协议，使用带序号四轮指令和编码器反馈。
-继续用厂商固件做自主采球时，需要对接可用的航向反馈，并在架空状态测断联后轮子是否会停车。
-目前的 `cmdOk` 实测覆盖了指令应答。墙标转出视野后的实际转角需要编码器、IMU 或其它可用航向观测。
-保留厂商 PID 的 [C26 编码器查询补丁与测试方法](firmware/openrf1/README.md#c26-v22-编码器反馈补丁) 已加入项目。烧录候选工程后可使用 `--c26-encoders` 读取四路实际转速。
-控制板若使用 `COLLECT1`，直连 GPIO UART 用 `--port /dev/ttyS4` 和 pyserial，经 CH340 用
-`--port ch340`。车体速度以前进、左移、逆时针为正。
+默认协议为 C26，经 CH340 连接 OpenRF1 的 MV 口。程序启动先发送零速并检查 `cmdOk`。每帧查询 `$ENC!`、处理画面与任务状态，再换算并发送四轮目标。墙标给出绝对航向。墙标离开视野后，通过两次编码器采样的计数差估算转角，重新看到墙标时校正。日志中的 `encoder_abcd`、`encoder_sample` 和 `heading_rad` 分别记录原始计数、控制板采样号和估计航向。正常退出或帧、反馈、应答异常时，程序在关闭串口前尝试发零速。
+
+完整任务上车前，先烧录并架空验证约 500 ms 的通信静默停车。在实车 JSON 中确认轮向和每圈计数后设 `drive_calibrated` 为 `true`，通过静默停车验收后设 `c26_watchdog_verified` 为 `true`。编译与测试步骤见 [C26 固件说明](firmware/openrf1/README.md#c26-v22-编码器反馈补丁)。
+
+```bash
+tools/run_collector.sh --serial DA6415777 --drive --config /path/to/vehicle.json
+```
+
+加 `--follow-ball` 可先验证单球跟随。使用系统串口时传入 `--port /dev/ttyUSB0` 等实际设备并安装 pyserial。候选固件使用 `--drive --protocol collect1`，默认端口为 `/dev/ttyS4`，也可显式指定 `--port ch340`。车体速度以前进、左移、逆时针为正。
 
 ## 实车参数和验收
 
@@ -84,7 +87,8 @@ python3 tools/check_openrf1_uart.py --port ch340 --factory-car
 
 | 配置项 | 起始值 | 实测方法与影响 |
 | --- | --- | --- |
-| `encoder_counts_per_rev`、`drive_sign_abcd`、`drive_calibrated` | 4680、[1,1,1,1]、false | 每圈计数按用户确认的 1:90、13 线、四倍频填写。轮向为示例。架空后手转**输出轮**一整圈，取编码器计数差的绝对值，跨 65535 时按 16 位回绕。分别点动 A/B/C/D，观察轮位，正命令往车头滚填 1，反向填 −1。四轮核实后在同一配置中填写两项实测值并将标志设为 true。它们同时影响闭环车速和转角。 |
+| `encoder_counts_per_rev`、`drive_sign_abcd`、`drive_calibrated` | 4680、[1,1,1,1]、false | 架空后手转**输出轮**一整圈，以计数差的绝对值核对每圈计数。C26 计数按 32 位回绕，COLLECT1 按 16 位。分别点动 A/B/C/D，正命令使对应轮向前滚则填 1，反向填 −1。 |
+| `c26_encoder_sign_abcd`、`c26_command_scale` | [-1,1,-1,1]、1.0 | 编码器符号用于把向前滚动的计数差统一换成正值。命令比例用于校准 C26 固件的速度单位，默认按计算出的轮端线速度直接发送。此前四轮发 0.10 m/s，实测车速约 0.0244 m/s。按实际地面测速复核比例和速度上限，并在实际车速下核对能否在 `turn_timeout_s` 内完成转向。 |
 | `wheel_radius_m`、`wheelbase_m`、`track_m` | 0.03、0.30、0.20 m | 轮半径按实车 60 mm 轮径填写。测前后轮中心距和左右轮中心距，填完整距离。用直线和地面直角线检查位移、转向比例。 |
 | `fork_forward_m`、`fork_width_m`、相机 YAML 的 `minimum_candidate_forward_m` | 0.06、0.20、0.06 m | 测车体中心到叉前缘、两杆内宽。在叉内和前方各摆一颗球。新目标的前向门限取前伸和近距门限的较大值，已锁定的球可继续靠近。 |
 | `visual_approach_speed_m_s`、`visual_standoff_m`、`push_speed_m_s` | 0.05 m/s、0.08 m、0.05 m/s | 临时遮住墙标，测叉前停车间隙。用单球验证推送速度是否会让球滚出。搜索、对准速度另由 `search_speed_m_s`、`approach_speed_m_s` 控制。单轮上限 `max_wheel_rad_s` 默认为 6 rad/s。 |
@@ -101,7 +105,7 @@ python3 tools/check_openrf1_uart.py --port ch340 --factory-car
 
 从等待相机启动到收到首帧的时限由 `camera_startup_timeout_s` 设置，默认为 8 秒。收到首帧后，按 `max_frame_age_s` 检查连续出帧和发送前的帧年龄。日志中的 `frame_age_ms` 是从驱动收到图像到轮速发送前的时间。图片回放该项为 `null`。
 
-上地前在架空状态检查四轮同向前进、左移和逆时针旋转的轮序。对 `COLLECT1` 验证运行中断开指令后控制输出在 500 ms 超时后的下一个 20 ms 控制周期内归零，并观察实际滑行。地面验收连续做两轮完整推送，遮挡一次墙标验证停车与恢复，记录布球数、实际入区数、漏收位置、重复锁定次数及实测转角。
+上地前在架空状态检查四轮同向前进、左移和逆时针旋转的轮序，并确认主循环连续发送轮速的间隔低于固件约 500 ms 的停车时限。识球耗时或串口等待过长会使底盘超时归零。地面验收连续做两轮完整推送，遮挡一次墙标验证停车与恢复，记录布球数、实际入区数、漏收位置、重复锁定次数及实测转角。
 
 ## 运行决策演示
 
